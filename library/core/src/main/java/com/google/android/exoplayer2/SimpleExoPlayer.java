@@ -58,6 +58,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeoutException;
 
 /**
  * An {@link ExoPlayer} implementation that uses default {@link Renderer} components. Instances can
@@ -1147,8 +1148,10 @@ public class SimpleExoPlayer extends BasePlayer
       // We're replacing a surface. Block to ensure that it's not accessed after the method returns.
       try {
         for (PlayerMessage message : messages) {
-          message.blockUntilDelivered();
+          message.blockUntilDelivered(200);
         }
+      } catch (TimeoutException e) {
+        Log.e(TAG, "WTF?! Just ignore the timeout");
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }

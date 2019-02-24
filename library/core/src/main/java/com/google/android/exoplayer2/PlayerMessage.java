@@ -19,6 +19,8 @@ import android.os.Handler;
 import android.support.annotation.Nullable;
 import com.google.android.exoplayer2.util.Assertions;
 
+import java.util.concurrent.TimeoutException;
+
 /**
  * Defines a player message which can be sent with a {@link Sender} and received by a {@link
  * Target}.
@@ -275,11 +277,21 @@ public final class PlayerMessage {
    * @throws InterruptedException If the current thread is interrupted while waiting for the message
    *     to be delivered.
    */
-  public synchronized boolean blockUntilDelivered() throws InterruptedException {
+  public synchronized boolean blockUntilDelivered(long millis) throws InterruptedException, TimeoutException {
     Assertions.checkState(isSent);
     Assertions.checkState(handler.getLooper().getThread() != Thread.currentThread());
+
+    long start = System.currentTimeMillis();
     while (!isProcessed) {
-      wait();
+      if (millis <= 0) {
+        wait();
+      } else {
+        long elapsed = System.currentTimeMillis() - start;
+        if (elapsed >= millis) {
+          throw new TimeoutException("Wait time-outed");
+        }
+        wait(millis - elapsed);
+      }
     }
     return isDelivered;
   }

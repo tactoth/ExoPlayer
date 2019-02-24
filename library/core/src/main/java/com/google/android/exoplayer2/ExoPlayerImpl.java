@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeoutException;
 
 /** An {@link ExoPlayer} implementation. Instances can be obtained from {@link ExoPlayerFactory}. */
 /* package */ final class ExoPlayerImpl extends BasePlayer implements ExoPlayer {
@@ -438,8 +439,10 @@ import java.util.concurrent.CopyOnWriteArraySet;
       boolean blockMessage = true;
       while (blockMessage) {
         try {
-          message.blockUntilDelivered();
+          message.blockUntilDelivered(0);
           blockMessage = false;
+        } catch (TimeoutException ignore) {
+          // pass, this is not possible
         } catch (InterruptedException e) {
           wasInterrupted = true;
         }

@@ -221,9 +221,18 @@ import java.util.Collections;
     }
     handler.sendEmptyMessage(MSG_RELEASE);
     boolean wasInterrupted = false;
+
+    long start = System.currentTimeMillis();
+    long timeoutMs = 200;
+
     while (!released) {
       try {
-        wait();
+        long elapsed = System.currentTimeMillis() - start;
+        if (elapsed >= timeoutMs) {
+          Log.e(TAG, "WTF! cannot release after 200ms, a better idea is to just return");
+          return;
+        }
+        wait(timeoutMs - elapsed);
       } catch (InterruptedException e) {
         wasInterrupted = true;
       }
