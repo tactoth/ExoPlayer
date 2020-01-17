@@ -15,8 +15,8 @@
  */
 package com.google.android.exoplayer2.source;
 
-import android.support.annotation.IntDef;
-import android.support.annotation.Nullable;
+import androidx.annotation.IntDef;
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.upstream.Allocator;
@@ -86,9 +86,8 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
   private final ArrayList<ClippingMediaPeriod> mediaPeriods;
   private final Timeline.Window window;
 
-  private @Nullable Object manifest;
-  private ClippingTimeline clippingTimeline;
-  private IllegalClippingException clippingError;
+  @Nullable private ClippingTimeline clippingTimeline;
+  @Nullable private IllegalClippingException clippingError;
   private long periodStartUs;
   private long periodEndUs;
 
@@ -111,36 +110,6 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
         startPositionUs,
         endPositionUs,
         /* enableInitialDiscontinuity= */ true,
-        /* allowDynamicClippingUpdates= */ false,
-        /* relativeToDefaultPosition= */ false);
-  }
-
-  /**
-   * Creates a new clipping source that wraps the specified source and provides samples between the
-   * specified start and end position.
-   *
-   * @param mediaSource The single-period source to wrap.
-   * @param startPositionUs The start position within {@code mediaSource}'s window at which to start
-   *     providing samples, in microseconds.
-   * @param endPositionUs The end position within {@code mediaSource}'s window at which to stop
-   *     providing samples, in microseconds. Specify {@link C#TIME_END_OF_SOURCE} to provide samples
-   *     from the specified start point up to the end of the source. Specifying a position that
-   *     exceeds the {@code mediaSource}'s duration will also result in the end of the source not
-   *     being clipped.
-   * @param enableInitialDiscontinuity Whether the initial discontinuity should be enabled.
-   */
-  // TODO: remove this when the new API is public.
-  @Deprecated
-  public ClippingMediaSource(
-      MediaSource mediaSource,
-      long startPositionUs,
-      long endPositionUs,
-      boolean enableInitialDiscontinuity) {
-    this(
-        mediaSource,
-        startPositionUs,
-        endPositionUs,
-        enableInitialDiscontinuity,
         /* allowDynamicClippingUpdates= */ false,
         /* relativeToDefaultPosition= */ false);
   }
@@ -222,7 +191,7 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
   }
 
   @Override
-  public void prepareSourceInternal(@Nullable TransferListener mediaTransferListener) {
+  protected void prepareSourceInternal(@Nullable TransferListener mediaTransferListener) {
     super.prepareSourceInternal(mediaTransferListener);
     prepareChildSource(/* id= */ null, mediaSource);
   }
@@ -252,24 +221,22 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
     Assertions.checkState(mediaPeriods.remove(mediaPeriod));
     mediaSource.releasePeriod(((ClippingMediaPeriod) mediaPeriod).mediaPeriod);
     if (mediaPeriods.isEmpty() && !allowDynamicClippingUpdates) {
-      refreshClippedTimeline(clippingTimeline.timeline);
+      refreshClippedTimeline(Assertions.checkNotNull(clippingTimeline).timeline);
     }
   }
 
   @Override
-  public void releaseSourceInternal() {
+  protected void releaseSourceInternal() {
     super.releaseSourceInternal();
     clippingError = null;
     clippingTimeline = null;
   }
 
   @Override
-  protected void onChildSourceInfoRefreshed(
-      Void id, MediaSource mediaSource, Timeline timeline, @Nullable Object manifest) {
+  protected void onChildSourceInfoRefreshed(Void id, MediaSource mediaSource, Timeline timeline) {
     if (clippingError != null) {
       return;
     }
-    this.manifest = manifest;
     refreshClippedTimeline(timeline);
   }
 
@@ -309,7 +276,7 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
       clippingError = e;
       return;
     }
-    refreshSourceInfo(clippingTimeline, manifest);
+    refreshSourceInfo(clippingTimeline);
   }
 
   @Override
@@ -374,10 +341,8 @@ public final class ClippingMediaSource extends CompositeMediaSource<Void> {
     }
 
     @Override
-    public Window getWindow(
-        int windowIndex, Window window, boolean setTag, long defaultPositionProjectionUs) {
-      timeline.getWindow(
-          /* windowIndex= */ 0, window, setTag, /* defaultPositionProjectionUs= */ 0);
+    public Window getWindow(int windowIndex, Window window, long defaultPositionProjectionUs) {
+      timeline.getWindow(/* windowIndex= */ 0, window, /* defaultPositionProjectionUs= */ 0);
       window.positionInFirstPeriodUs += startUs;
       window.durationUs = durationUs;
       window.isDynamic = isDynamic;

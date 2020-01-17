@@ -22,10 +22,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.net.Uri;
-import android.support.annotation.Nullable;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import androidx.annotation.Nullable;
+import androidx.test.core.app.ApplicationProvider;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.ads.interactivemedia.v3.api.Ad;
 import com.google.ads.interactivemedia.v3.api.AdDisplayContainer;
 import com.google.ads.interactivemedia.v3.api.AdEvent;
@@ -54,16 +56,15 @@ import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.robolectric.RobolectricTestRunner;
-import org.robolectric.RuntimeEnvironment;
 
 /** Test for {@link ImaAdsLoader}. */
-@RunWith(RobolectricTestRunner.class)
+@RunWith(AndroidJUnit4.class)
 public class ImaAdsLoaderTest {
 
   private static final long CONTENT_DURATION_US = 10 * C.MICROS_PER_SECOND;
   private static final Timeline CONTENT_TIMELINE =
-      new SinglePeriodTimeline(CONTENT_DURATION_US, /* isSeekable= */ true, /* isDynamic= */ false);
+      new SinglePeriodTimeline(
+          CONTENT_DURATION_US, /* isSeekable= */ true, /* isDynamic= */ false, /* isLive= */ false);
   private static final Uri TEST_URI = Uri.EMPTY;
   private static final long TEST_AD_DURATION_US = 5 * C.MICROS_PER_SECOND;
   private static final long[][] PREROLL_ADS_DURATIONS_US = new long[][] {{TEST_AD_DURATION_US}};
@@ -95,8 +96,8 @@ public class ImaAdsLoaderTest {
             adDisplayContainer,
             fakeAdsRequest,
             fakeAdsLoader);
-    adViewGroup = new FrameLayout(RuntimeEnvironment.application);
-    adOverlayView = new View(RuntimeEnvironment.application);
+    adViewGroup = new FrameLayout(ApplicationProvider.getApplicationContext());
+    adOverlayView = new View(ApplicationProvider.getApplicationContext());
     adViewProvider =
         new AdsLoader.AdViewProvider() {
           @Override
@@ -143,7 +144,8 @@ public class ImaAdsLoaderTest {
     assertThat(adsLoaderListener.adPlaybackState)
         .isEqualTo(
             new AdPlaybackState(/* adGroupTimesUs= */ 0)
-                .withAdDurationsUs(PREROLL_ADS_DURATIONS_US));
+                .withAdDurationsUs(PREROLL_ADS_DURATIONS_US)
+                .withContentDurationUs(CONTENT_DURATION_US));
   }
 
   @Test
@@ -237,7 +239,7 @@ public class ImaAdsLoaderTest {
     adsLoaderListener = new TestAdsLoaderListener(fakeExoPlayer, contentTimeline, adDurationsUs);
     when(adsManager.getAdCuePoints()).thenReturn(Arrays.asList(cuePoints));
     imaAdsLoader =
-        new ImaAdsLoader.Builder(RuntimeEnvironment.application)
+        new ImaAdsLoader.Builder(ApplicationProvider.getApplicationContext())
             .setImaFactory(testImaFactory)
             .setImaSdkSettings(imaSdkSettings)
             .buildForAdTag(TEST_URI);
@@ -252,7 +254,8 @@ public class ImaAdsLoaderTest {
       }
 
       @Override
-      public @Nullable Ad getAd() {
+      @Nullable
+      public Ad getAd() {
         return ad;
       }
 

@@ -18,6 +18,7 @@ package com.google.android.exoplayer2.drm;
 import android.annotation.TargetApi;
 import android.net.Uri;
 import android.text.TextUtils;
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.drm.ExoMediaDrm.KeyRequest;
 import com.google.android.exoplayer2.drm.ExoMediaDrm.ProvisionRequest;
@@ -110,7 +111,7 @@ public final class HttpMediaDrmCallback implements MediaDrmCallback {
   public byte[] executeProvisionRequest(UUID uuid, ProvisionRequest request) throws IOException {
     String url =
         request.getDefaultUrl() + "&signedRequest=" + Util.fromUtf8Bytes(request.getData());
-    return executePost(dataSourceFactory, url, Util.EMPTY_BYTE_ARRAY, null);
+    return executePost(dataSourceFactory, url, /* httpBody= */ null, /* requestProperties= */ null);
   }
 
   @Override
@@ -135,8 +136,12 @@ public final class HttpMediaDrmCallback implements MediaDrmCallback {
     return executePost(dataSourceFactory, url, request.getData(), requestProperties);
   }
 
-  private static byte[] executePost(HttpDataSource.Factory dataSourceFactory, String url,
-      byte[] data, Map<String, String> requestProperties) throws IOException {
+  private static byte[] executePost(
+      HttpDataSource.Factory dataSourceFactory,
+      String url,
+      @Nullable byte[] httpBody,
+      @Nullable Map<String, String> requestProperties)
+      throws IOException {
     HttpDataSource dataSource = dataSourceFactory.createDataSource();
     if (requestProperties != null) {
       for (Map.Entry<String, String> requestProperty : requestProperties.entrySet()) {
@@ -149,7 +154,8 @@ public final class HttpMediaDrmCallback implements MediaDrmCallback {
       DataSpec dataSpec =
           new DataSpec(
               Uri.parse(url),
-              data,
+              DataSpec.HTTP_METHOD_POST,
+              httpBody,
               /* absoluteStreamPosition= */ 0,
               /* position= */ 0,
               /* length= */ C.LENGTH_UNSET,
@@ -164,17 +170,18 @@ public final class HttpMediaDrmCallback implements MediaDrmCallback {
         boolean manuallyRedirect =
             (e.responseCode == 307 || e.responseCode == 308)
                 && manualRedirectCount++ < MAX_MANUAL_REDIRECTS;
-        url = manuallyRedirect ? getRedirectUrl(e) : null;
-        if (url == null) {
+        String redirectUrl = manuallyRedirect ? getRedirectUrl(e) : null;
+        if (redirectUrl == null) {
           throw e;
         }
+        url = redirectUrl;
       } finally {
         Util.closeQuietly(inputStream);
       }
     }
   }
 
-  private static String getRedirectUrl(InvalidResponseCodeException exception) {
+  private static @Nullable String getRedirectUrl(InvalidResponseCodeException exception) {
     Map<String, List<String>> headerFields = exception.headerFields;
     if (headerFields != null) {
       List<String> locationHeaders = headerFields.get("Location");

@@ -24,6 +24,7 @@ import static com.google.android.exoplayer2.util.Util.parseXsDuration;
 import static com.google.android.exoplayer2.util.Util.unescapeFileName;
 import static com.google.common.truth.Truth.assertThat;
 
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.testutil.TestUtil;
 import java.util.ArrayList;
@@ -33,12 +34,10 @@ import java.util.Random;
 import java.util.zip.Deflater;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
-/**
- * Unit tests for {@link Util}.
- */
-@RunWith(RobolectricTestRunner.class)
+/** Unit tests for {@link Util}. */
+@RunWith(AndroidJUnit4.class)
 public class UtilTest {
 
   @Test
@@ -219,6 +218,24 @@ public class UtilTest {
   }
 
   @Test
+  public void testToUnsignedLongPositiveValue() {
+    int x = 0x05D67F23;
+
+    long result = Util.toUnsignedLong(x);
+
+    assertThat(result).isEqualTo(0x05D67F23L);
+  }
+
+  @Test
+  public void testToUnsignedLongNegativeValue() {
+    int x = 0xF5D67F23;
+
+    long result = Util.toUnsignedLong(x);
+
+    assertThat(result).isEqualTo(0xF5D67F23L);
+  }
+
+  @Test
   public void testGetCodecsOfType() {
     assertThat(getCodecsOfType(null, C.TRACK_TYPE_VIDEO)).isNull();
     assertThat(getCodecsOfType("avc1.64001e,vp9.63.1", C.TRACK_TYPE_AUDIO)).isNull();
@@ -250,6 +267,30 @@ public class UtilTest {
   }
 
   @Test
+  public void testCrc32() {
+    byte[] bytes = {0x5F, 0x78, 0x04, 0x7B, 0x5F};
+    int start = 1;
+    int end = 4;
+    int initialValue = 0xFFFFFFFF;
+
+    int result = Util.crc32(bytes, start, end, initialValue);
+
+    assertThat(result).isEqualTo(0x67CE9747);
+  }
+
+  @Test
+  public void testCrc8() {
+    byte[] bytes = {0x5F, 0x78, 0x04, 0x7B, 0x5F};
+    int start = 1;
+    int end = 4;
+    int initialValue = 0;
+
+    int result = Util.crc8(bytes, start, end, initialValue);
+
+    assertThat(result).isEqualTo(0x4);
+  }
+
+  @Test
   public void testInflate() {
     byte[] testData = TestUtil.buildTestData(/*arbitrary test data size*/ 256 * 1024);
     byte[] compressedData = new byte[testData.length * 2];
@@ -266,6 +307,72 @@ public class UtilTest {
     assertThat(Arrays.copyOf(output.data, output.limit())).isEqualTo(testData);
   }
 
+  @Test
+  @Config(sdk = 21)
+  public void testNormalizeLanguageCodeV21() {
+    assertThat(Util.normalizeLanguageCode(null)).isNull();
+    assertThat(Util.normalizeLanguageCode("")).isEmpty();
+    assertThat(Util.normalizeLanguageCode("es")).isEqualTo("es");
+    assertThat(Util.normalizeLanguageCode("spa")).isEqualTo("es");
+    assertThat(Util.normalizeLanguageCode("es-AR")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("SpA-ar")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("es_AR")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("spa_ar")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("es-AR-dialect")).isEqualTo("es-ar-dialect");
+    assertThat(Util.normalizeLanguageCode("ES-419")).isEqualTo("es-419");
+    assertThat(Util.normalizeLanguageCode("zh-hans-tw")).isEqualTo("zh-hans-tw");
+    assertThat(Util.normalizeLanguageCode("zh-tw-hans")).isEqualTo("zh-tw");
+    assertThat(Util.normalizeLanguageCode("zho-hans-tw")).isEqualTo("zh-hans-tw");
+    assertThat(Util.normalizeLanguageCode("und")).isEqualTo("und");
+    assertThat(Util.normalizeLanguageCode("DoesNotExist")).isEqualTo("doesnotexist");
+  }
+
+  @Test
+  @Config(sdk = 16)
+  public void testNormalizeLanguageCode() {
+    assertThat(Util.normalizeLanguageCode(null)).isNull();
+    assertThat(Util.normalizeLanguageCode("")).isEmpty();
+    assertThat(Util.normalizeLanguageCode("es")).isEqualTo("es");
+    assertThat(Util.normalizeLanguageCode("spa")).isEqualTo("es");
+    assertThat(Util.normalizeLanguageCode("es-AR")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("SpA-ar")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("es_AR")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("spa_ar")).isEqualTo("es-ar");
+    assertThat(Util.normalizeLanguageCode("es-AR-dialect")).isEqualTo("es-ar-dialect");
+    assertThat(Util.normalizeLanguageCode("ES-419")).isEqualTo("es-419");
+    assertThat(Util.normalizeLanguageCode("zh-hans-tw")).isEqualTo("zh-hans-tw");
+    // Doesn't work on API < 21 because we can't use Locale syntax verification.
+    // assertThat(Util.normalizeLanguageCode("zh-tw-hans")).isEqualTo("zh-tw");
+    assertThat(Util.normalizeLanguageCode("zho-hans-tw")).isEqualTo("zh-hans-tw");
+    assertThat(Util.normalizeLanguageCode("und")).isEqualTo("und");
+    assertThat(Util.normalizeLanguageCode("DoesNotExist")).isEqualTo("doesnotexist");
+  }
+
+  @Test
+  public void testNormalizeIso6392BibliographicalAndTextualCodes() {
+    // See https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes.
+    assertThat(Util.normalizeLanguageCode("alb")).isEqualTo(Util.normalizeLanguageCode("sqi"));
+    assertThat(Util.normalizeLanguageCode("arm")).isEqualTo(Util.normalizeLanguageCode("hye"));
+    assertThat(Util.normalizeLanguageCode("baq")).isEqualTo(Util.normalizeLanguageCode("eus"));
+    assertThat(Util.normalizeLanguageCode("bur")).isEqualTo(Util.normalizeLanguageCode("mya"));
+    assertThat(Util.normalizeLanguageCode("chi")).isEqualTo(Util.normalizeLanguageCode("zho"));
+    assertThat(Util.normalizeLanguageCode("cze")).isEqualTo(Util.normalizeLanguageCode("ces"));
+    assertThat(Util.normalizeLanguageCode("dut")).isEqualTo(Util.normalizeLanguageCode("nld"));
+    assertThat(Util.normalizeLanguageCode("fre")).isEqualTo(Util.normalizeLanguageCode("fra"));
+    assertThat(Util.normalizeLanguageCode("geo")).isEqualTo(Util.normalizeLanguageCode("kat"));
+    assertThat(Util.normalizeLanguageCode("ger")).isEqualTo(Util.normalizeLanguageCode("deu"));
+    assertThat(Util.normalizeLanguageCode("gre")).isEqualTo(Util.normalizeLanguageCode("ell"));
+    assertThat(Util.normalizeLanguageCode("ice")).isEqualTo(Util.normalizeLanguageCode("isl"));
+    assertThat(Util.normalizeLanguageCode("mac")).isEqualTo(Util.normalizeLanguageCode("mkd"));
+    assertThat(Util.normalizeLanguageCode("mao")).isEqualTo(Util.normalizeLanguageCode("mri"));
+    assertThat(Util.normalizeLanguageCode("may")).isEqualTo(Util.normalizeLanguageCode("msa"));
+    assertThat(Util.normalizeLanguageCode("per")).isEqualTo(Util.normalizeLanguageCode("fas"));
+    assertThat(Util.normalizeLanguageCode("rum")).isEqualTo(Util.normalizeLanguageCode("ron"));
+    assertThat(Util.normalizeLanguageCode("slo")).isEqualTo(Util.normalizeLanguageCode("slk"));
+    assertThat(Util.normalizeLanguageCode("tib")).isEqualTo(Util.normalizeLanguageCode("bod"));
+    assertThat(Util.normalizeLanguageCode("wel")).isEqualTo(Util.normalizeLanguageCode("cym"));
+  }
+
   private static void assertEscapeUnescapeFileName(String fileName, String escapedFileName) {
     assertThat(escapeFileName(fileName)).isEqualTo(escapedFileName);
     assertThat(unescapeFileName(escapedFileName)).isEqualTo(fileName);
@@ -275,5 +382,4 @@ public class UtilTest {
     String escapedFileName = Util.escapeFileName(fileName);
     assertThat(unescapeFileName(escapedFileName)).isEqualTo(fileName);
   }
-
 }
