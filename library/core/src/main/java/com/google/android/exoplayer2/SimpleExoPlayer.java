@@ -112,6 +112,7 @@ public class SimpleExoPlayer extends BasePlayer
     private boolean useLazyPreparation;
     private SeekParameters seekParameters;
     private boolean pauseAtEndOfMediaItems;
+    private long releaseTimeoutMs;
     private boolean throwWhenStuckBuffering;
     private boolean buildCalled;
 
@@ -488,6 +489,11 @@ public class SimpleExoPlayer extends BasePlayer
       return this;
     }
 
+    public Builder setReleaseTimeoutMs(long releaseTimeoutMs) {
+      this.releaseTimeoutMs = releaseTimeoutMs;
+      return this;
+    }
+
     /**
      * Sets the {@link Clock} that will be used by the player. Should only be set for testing
      * purposes.
@@ -634,6 +640,10 @@ public class SimpleExoPlayer extends BasePlayer
             builder.pauseAtEndOfMediaItems,
             builder.clock,
             builder.looper);
+    if (builder.releaseTimeoutMs > 0) {
+      player.experimentalSetReleaseTimeoutMs(builder.releaseTimeoutMs);
+    }
+
     player.addListener(componentListener);
     videoDebugListeners.add(analyticsCollector);
     videoListeners.add(analyticsCollector);
@@ -2416,4 +2426,6 @@ public class SimpleExoPlayer extends BasePlayer
       updateWakeAndWifiLock();
     }
   }
+
+
 }
