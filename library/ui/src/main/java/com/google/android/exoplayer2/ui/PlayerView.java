@@ -16,7 +16,6 @@
 package com.google.android.exoplayer2.ui;
 
 import android.annotation.SuppressLint;
-import android.annotation.TargetApi;
 import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -40,6 +39,7 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.core.content.ContextCompat;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.ControlDispatcher;
@@ -48,6 +48,8 @@ import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.PlaybackPreparer;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.Player.DiscontinuityReason;
+import com.google.android.exoplayer2.Timeline;
+import com.google.android.exoplayer2.Timeline.Period;
 import com.google.android.exoplayer2.metadata.Metadata;
 import com.google.android.exoplayer2.metadata.flac.PictureFrame;
 import com.google.android.exoplayer2.metadata.id3.ApicFrame;
@@ -66,6 +68,7 @@ import com.google.android.exoplayer2.util.RepeatModeUtil;
 import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.video.VideoDecoderGLSurfaceView;
 import com.google.android.exoplayer2.video.VideoListener;
+import com.google.common.collect.ImmutableList;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -79,7 +82,8 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
  * during playback, and displays playback controls using a {@link PlayerControlView}.
  *
  * <p>A PlayerView can be customized by setting attributes (or calling corresponding methods),
- * overriding the view's layout file or by specifying a custom view layout file, as outlined below.
+ * overriding drawables, overriding the view's layout file, or by specifying a custom view layout
+ * file.
  *
  * <h3>Attributes</h3>
  *
@@ -142,6 +146,12 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
  *         <li>Corresponding method: None
  *         <li>Default: {@code surface_view}
  *       </ul>
+ *   <li><b>{@code use_sensor_rotation}</b> - Whether to use the orientation sensor for rotation
+ *       during spherical playbacks (if available).
+ *       <ul>
+ *         <li>Corresponding method: {@link #setUseSensorRotation(boolean)}
+ *         <li>Default: {@code true}
+ *       </ul>
  *   <li><b>{@code shutter_background_color}</b> - The background color of the {@code exo_shutter}
  *       view.
  *       <ul>
@@ -172,6 +182,12 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
  *       exo_controller} (see below).
  * </ul>
  *
+ * <h3>Overriding drawables</h3>
+ *
+ * The drawables used by {@link PlayerControlView} (with its default layout file) can be overridden
+ * by drawables with the same names defined in your application. See the {@link PlayerControlView}
+ * documentation for a list of drawables that can be overridden.
+ *
  * <h3>Overriding the layout file</h3>
  *
  * To customize the layout of PlayerView throughout your app, or just for certain configurations,
@@ -179,8 +195,6 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
  * directories. These layouts will override the one provided by the ExoPlayer library, and will be
  * inflated for use by PlayerView. The view identifies and binds its children by looking for the
  * following ids:
- *
- * <p>
  *
  * <ul>
  *   <li><b>{@code exo_content_frame}</b> - A frame whose aspect ratio is resized based on the video
@@ -301,6 +315,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
   @Nullable private Drawable defaultArtwork;
   private @ShowBuffering int showBuffering;
   private boolean keepContentOnPlayerReset;
+  private boolean useSensorRotation;
   @Nullable private ErrorMessageProvider<? super ExoPlaybackException> errorMessageProvider;
   @Nullable private CharSequence customErrorMessage;
   private int controllerShowTimeoutMs;
@@ -360,6 +375,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
     boolean controllerAutoShow = true;
     boolean controllerHideDuringAds = true;
     int showBuffering = SHOW_BUFFERING_NEVER;
+    useSensorRotation = true;
     if (attrs != null) {
       TypedArray a = context.getTheme().obtainStyledAttributes(attrs, R.styleable.PlayerView, 0, 0);
       try {
@@ -383,6 +399,8 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
                 R.styleable.PlayerView_keep_content_on_player_reset, keepContentOnPlayerReset);
         controllerHideDuringAds =
             a.getBoolean(R.styleable.PlayerView_hide_during_ads, controllerHideDuringAds);
+        useSensorRotation =
+            a.getBoolean(R.styleable.PlayerView_use_sensor_rotation, useSensorRotation);
       } finally {
         a.recycle();
       }
@@ -415,6 +433,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
         case SURFACE_TYPE_SPHERICAL_GL_SURFACE_VIEW:
           SphericalGLSurfaceView sphericalGLSurfaceView = new SphericalGLSurfaceView(context);
           sphericalGLSurfaceView.setSingleTapListener(componentListener);
+          sphericalGLSurfaceView.setUseSensorRotation(useSensorRotation);
           surfaceView = sphericalGLSurfaceView;
           break;
         case SURFACE_TYPE_VIDEO_DECODER_GL_SURFACE_VIEW:
@@ -564,12 +583,12 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
         oldTextComponent.removeTextOutput(componentListener);
       }
     }
+    if (subtitleView != null) {
+      subtitleView.setCues(null);
+    }
     this.player = player;
     if (useController()) {
       controller.setPlayer(player);
-    }
-    if (subtitleView != null) {
-      subtitleView.setCues(null);
     }
     updateBuffering();
     updateErrorMessage();
@@ -592,6 +611,9 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
       @Nullable Player.TextComponent newTextComponent = player.getTextComponent();
       if (newTextComponent != null) {
         newTextComponent.addTextOutput(componentListener);
+        if (subtitleView != null) {
+          subtitleView.setCues(newTextComponent.getCurrentCues());
+        }
       }
       player.addListener(componentListener);
       maybeShowController(false);
@@ -736,6 +758,22 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
     if (this.keepContentOnPlayerReset != keepContentOnPlayerReset) {
       this.keepContentOnPlayerReset = keepContentOnPlayerReset;
       updateForCurrentTrackSelections(/* isNewPlayer= */ false);
+    }
+  }
+
+  /**
+   * Sets whether to use the orientation sensor for rotation during spherical playbacks (if
+   * available)
+   *
+   * @param useSensorRotation Whether to use the orientation sensor for rotation during spherical
+   *     playbacks.
+   */
+  public void setUseSensorRotation(boolean useSensorRotation) {
+    if (this.useSensorRotation != useSensorRotation) {
+      this.useSensorRotation = useSensorRotation;
+      if (surfaceView instanceof SphericalGLSurfaceView) {
+        ((SphericalGLSurfaceView) surfaceView).setUseSensorRotation(useSensorRotation);
+      }
     }
   }
 
@@ -958,31 +996,70 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
   /**
    * Sets the {@link ControlDispatcher}.
    *
-   * @param controlDispatcher The {@link ControlDispatcher}, or null to use {@link
-   *     DefaultControlDispatcher}.
+   * @param controlDispatcher The {@link ControlDispatcher}.
    */
-  public void setControlDispatcher(@Nullable ControlDispatcher controlDispatcher) {
+  public void setControlDispatcher(ControlDispatcher controlDispatcher) {
     Assertions.checkStateNotNull(controller);
     controller.setControlDispatcher(controlDispatcher);
   }
 
   /**
-   * Sets the rewind increment in milliseconds.
+   * Sets whether the rewind button is shown.
    *
-   * @param rewindMs The rewind increment in milliseconds. A non-positive value will cause the
-   *     rewind button to be disabled.
+   * @param showRewindButton Whether the rewind button is shown.
    */
+  public void setShowRewindButton(boolean showRewindButton) {
+    Assertions.checkStateNotNull(controller);
+    controller.setShowRewindButton(showRewindButton);
+  }
+
+  /**
+   * Sets whether the fast forward button is shown.
+   *
+   * @param showFastForwardButton Whether the fast forward button is shown.
+   */
+  public void setShowFastForwardButton(boolean showFastForwardButton) {
+    Assertions.checkStateNotNull(controller);
+    controller.setShowFastForwardButton(showFastForwardButton);
+  }
+
+  /**
+   * Sets whether the previous button is shown.
+   *
+   * @param showPreviousButton Whether the previous button is shown.
+   */
+  public void setShowPreviousButton(boolean showPreviousButton) {
+    Assertions.checkStateNotNull(controller);
+    controller.setShowPreviousButton(showPreviousButton);
+  }
+
+  /**
+   * Sets whether the next button is shown.
+   *
+   * @param showNextButton Whether the next button is shown.
+   */
+  public void setShowNextButton(boolean showNextButton) {
+    Assertions.checkStateNotNull(controller);
+    controller.setShowNextButton(showNextButton);
+  }
+
+  /**
+   * @deprecated Use {@link #setControlDispatcher(ControlDispatcher)} with {@link
+   *     DefaultControlDispatcher#DefaultControlDispatcher(long, long)}.
+   */
+  @SuppressWarnings("deprecation")
+  @Deprecated
   public void setRewindIncrementMs(int rewindMs) {
     Assertions.checkStateNotNull(controller);
     controller.setRewindIncrementMs(rewindMs);
   }
 
   /**
-   * Sets the fast forward increment in milliseconds.
-   *
-   * @param fastForwardMs The fast forward increment in milliseconds. A non-positive value will
-   *     cause the fast forward button to be disabled.
+   * @deprecated Use {@link #setControlDispatcher(ControlDispatcher)} with {@link
+   *     DefaultControlDispatcher#DefaultControlDispatcher(long, long)}.
    */
+  @SuppressWarnings("deprecation")
+  @Deprecated
   public void setFastForwardIncrementMs(int fastForwardMs) {
     Assertions.checkStateNotNull(controller);
     controller.setFastForwardIncrementMs(fastForwardMs);
@@ -1182,15 +1259,20 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
   }
 
   @Override
-  public View[] getAdOverlayViews() {
-    ArrayList<View> overlayViews = new ArrayList<>();
+  public List<AdsLoader.OverlayInfo> getAdOverlayInfos() {
+    List<AdsLoader.OverlayInfo> overlayViews = new ArrayList<>();
     if (overlayFrameLayout != null) {
-      overlayViews.add(overlayFrameLayout);
+      overlayViews.add(
+          new AdsLoader.OverlayInfo(
+              overlayFrameLayout,
+              AdsLoader.OverlayInfo.PURPOSE_NOT_VISIBLE,
+              /* detailedReason= */ "Transparent overlay does not impact viewability"));
     }
     if (controller != null) {
-      overlayViews.add(controller);
+      overlayViews.add(
+          new AdsLoader.OverlayInfo(controller, AdsLoader.OverlayInfo.PURPOSE_CONTROLS));
     }
-    return overlayViews.toArray(new View[0]);
+    return ImmutableList.copyOf(overlayViews);
   }
 
   // Internal methods.
@@ -1387,7 +1469,7 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
         errorMessageView.setVisibility(View.VISIBLE);
         return;
       }
-      @Nullable ExoPlaybackException error = player != null ? player.getPlaybackError() : null;
+      @Nullable ExoPlaybackException error = player != null ? player.getPlayerError() : null;
       if (error != null && errorMessageProvider != null) {
         CharSequence errorMessage = errorMessageProvider.getErrorMessage(error).second;
         errorMessageView.setText(errorMessage);
@@ -1412,7 +1494,15 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
     }
   }
 
-  @TargetApi(23)
+  private void updateControllerVisibility() {
+    if (isPlayingAd() && controllerHideDuringAds) {
+      hideController();
+    } else {
+      maybeShowController(false);
+    }
+  }
+
+  @RequiresApi(23)
   private static void configureEditModeLogoV23(Resources resources, ImageView logo) {
     logo.setImageDrawable(resources.getDrawable(R.drawable.exo_edit_mode_logo, null));
     logo.setBackgroundColor(resources.getColor(R.color.exo_edit_mode_background_color, null));
@@ -1472,6 +1562,13 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
           SingleTapListener,
           PlayerControlView.VisibilityListener {
 
+    private final Period period;
+    private @Nullable Object lastPeriodUidWithTracks;
+
+    public ComponentListener() {
+      period = new Period();
+    }
+
     // TextOutput implementation
 
     @Override
@@ -1520,20 +1617,46 @@ public class PlayerView extends FrameLayout implements AdsLoader.AdViewProvider 
 
     @Override
     public void onTracksChanged(TrackGroupArray tracks, TrackSelectionArray selections) {
+      // Suppress the update if transitioning to an unprepared period within the same window. This
+      // is necessary to avoid closing the shutter when such a transition occurs. See:
+      // https://github.com/google/ExoPlayer/issues/5507.
+      Player player = Assertions.checkNotNull(PlayerView.this.player);
+      Timeline timeline = player.getCurrentTimeline();
+      if (timeline.isEmpty()) {
+        lastPeriodUidWithTracks = null;
+      } else if (!player.getCurrentTrackGroups().isEmpty()) {
+        lastPeriodUidWithTracks =
+            timeline.getPeriod(player.getCurrentPeriodIndex(), period, /* setIds= */ true).uid;
+      } else if (lastPeriodUidWithTracks != null) {
+        int lastPeriodIndexWithTracks = timeline.getIndexOfPeriod(lastPeriodUidWithTracks);
+        if (lastPeriodIndexWithTracks != C.INDEX_UNSET) {
+          int lastWindowIndexWithTracks =
+              timeline.getPeriod(lastPeriodIndexWithTracks, period).windowIndex;
+          if (player.getCurrentWindowIndex() == lastWindowIndexWithTracks) {
+            // We're in the same window. Suppress the update.
+            return;
+          }
+        }
+        lastPeriodUidWithTracks = null;
+      }
+
       updateForCurrentTrackSelections(/* isNewPlayer= */ false);
     }
 
     // Player.EventListener implementation
 
     @Override
-    public void onPlayerStateChanged(boolean playWhenReady, @Player.State int playbackState) {
+    public void onPlaybackStateChanged(@Player.State int playbackState) {
       updateBuffering();
       updateErrorMessage();
-      if (isPlayingAd() && controllerHideDuringAds) {
-        hideController();
-      } else {
-        maybeShowController(false);
-      }
+      updateControllerVisibility();
+    }
+
+    @Override
+    public void onPlayWhenReadyChanged(
+        boolean playWhenReady, @Player.PlayWhenReadyChangeReason int reason) {
+      updateBuffering();
+      updateControllerVisibility();
     }
 
     @Override
