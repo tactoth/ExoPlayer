@@ -24,17 +24,12 @@ import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.util.Assertions;
 
-/**
- * A {@link Timeline} consisting of a single period and static window.
- */
+/** A {@link Timeline} consisting of a single period and static window. */
 public final class SinglePeriodTimeline extends Timeline {
 
   private static final Object UID = new Object();
   private static final MediaItem MEDIA_ITEM =
-      new MediaItem.Builder()
-          .setMediaId("com.google.android.exoplayer2.source.SinglePeriodTimeline")
-          .setUri(Uri.EMPTY)
-          .build();
+      new MediaItem.Builder().setMediaId("SinglePeriodTimeline").setUri(Uri.EMPTY).build();
 
   private final long presentationStartTimeMs;
   private final long windowStartTimeMs;
@@ -45,9 +40,9 @@ public final class SinglePeriodTimeline extends Timeline {
   private final long windowDefaultStartPositionUs;
   private final boolean isSeekable;
   private final boolean isDynamic;
-  private final boolean isLive;
   @Nullable private final Object manifest;
   @Nullable private final MediaItem mediaItem;
+  @Nullable private final MediaItem.LiveConfiguration liveConfiguration;
 
   /**
    * @deprecated Use {@link #SinglePeriodTimeline(long, boolean, boolean, boolean, Object,
@@ -81,7 +76,8 @@ public final class SinglePeriodTimeline extends Timeline {
    * @param durationUs The duration of the period, in microseconds.
    * @param isSeekable Whether seeking is supported within the period.
    * @param isDynamic Whether the window may change when the timeline is updated.
-   * @param isLive Whether the window is live.
+   * @param useLiveConfiguration Whether the window is live and {@link MediaItem#liveConfiguration}
+   *     is used to configure live playback behaviour.
    * @param manifest The manifest. May be {@code null}.
    * @param mediaItem A media item used for {@link Window#mediaItem}.
    */
@@ -89,7 +85,7 @@ public final class SinglePeriodTimeline extends Timeline {
       long durationUs,
       boolean isSeekable,
       boolean isDynamic,
-      boolean isLive,
+      boolean useLiveConfiguration,
       @Nullable Object manifest,
       MediaItem mediaItem) {
     this(
@@ -99,7 +95,7 @@ public final class SinglePeriodTimeline extends Timeline {
         /* windowDefaultStartPositionUs= */ 0,
         isSeekable,
         isDynamic,
-        isLive,
+        useLiveConfiguration,
         manifest,
         mediaItem);
   }
@@ -148,7 +144,8 @@ public final class SinglePeriodTimeline extends Timeline {
    *     which to begin playback, in microseconds.
    * @param isSeekable Whether seeking is supported within the window.
    * @param isDynamic Whether the window may change when the timeline is updated.
-   * @param isLive Whether the window is live.
+   * @param useLiveConfiguration Whether the window is live and {@link MediaItem#liveConfiguration}
+   *     is used to configure live playback behaviour.
    * @param manifest The manifest. May be (@code null}.
    * @param mediaItem A media item used for {@link Timeline.Window#mediaItem}.
    */
@@ -159,7 +156,7 @@ public final class SinglePeriodTimeline extends Timeline {
       long windowDefaultStartPositionUs,
       boolean isSeekable,
       boolean isDynamic,
-      boolean isLive,
+      boolean useLiveConfiguration,
       @Nullable Object manifest,
       MediaItem mediaItem) {
     this(
@@ -172,14 +169,14 @@ public final class SinglePeriodTimeline extends Timeline {
         windowDefaultStartPositionUs,
         isSeekable,
         isDynamic,
-        isLive,
         manifest,
-        mediaItem);
+        mediaItem,
+        useLiveConfiguration ? mediaItem.liveConfiguration : null);
   }
 
   /**
    * @deprecated Use {@link #SinglePeriodTimeline(long, long, long, long, long, long, long, boolean,
-   *     boolean, boolean, Object, MediaItem)} instead.
+   *     boolean, Object, MediaItem, MediaItem.LiveConfiguration)} instead.
    */
   @Deprecated
   public SinglePeriodTimeline(
@@ -205,9 +202,9 @@ public final class SinglePeriodTimeline extends Timeline {
         windowDefaultStartPositionUs,
         isSeekable,
         isDynamic,
-        isLive,
         manifest,
-        MEDIA_ITEM.buildUpon().setTag(tag).build());
+        MEDIA_ITEM.buildUpon().setTag(tag).build(),
+        isLive ? MEDIA_ITEM.liveConfiguration : null);
   }
 
   /**
@@ -229,9 +226,10 @@ public final class SinglePeriodTimeline extends Timeline {
    *     which to begin playback, in microseconds.
    * @param isSeekable Whether seeking is supported within the window.
    * @param isDynamic Whether the window may change when the timeline is updated.
-   * @param isLive Whether the window is live.
    * @param manifest The manifest. May be {@code null}.
    * @param mediaItem A media item used for {@link Timeline.Window#mediaItem}.
+   * @param liveConfiguration The configuration for live playback behaviour, or {@code null} if the
+   *     window is not live.
    */
   public SinglePeriodTimeline(
       long presentationStartTimeMs,
@@ -243,9 +241,9 @@ public final class SinglePeriodTimeline extends Timeline {
       long windowDefaultStartPositionUs,
       boolean isSeekable,
       boolean isDynamic,
-      boolean isLive,
       @Nullable Object manifest,
-      MediaItem mediaItem) {
+      MediaItem mediaItem,
+      @Nullable MediaItem.LiveConfiguration liveConfiguration) {
     this.presentationStartTimeMs = presentationStartTimeMs;
     this.windowStartTimeMs = windowStartTimeMs;
     this.elapsedRealtimeEpochOffsetMs = elapsedRealtimeEpochOffsetMs;
@@ -255,9 +253,9 @@ public final class SinglePeriodTimeline extends Timeline {
     this.windowDefaultStartPositionUs = windowDefaultStartPositionUs;
     this.isSeekable = isSeekable;
     this.isDynamic = isDynamic;
-    this.isLive = isLive;
     this.manifest = manifest;
     this.mediaItem = checkNotNull(mediaItem);
+    this.liveConfiguration = liveConfiguration;
   }
 
   @Override
@@ -291,7 +289,7 @@ public final class SinglePeriodTimeline extends Timeline {
         elapsedRealtimeEpochOffsetMs,
         isSeekable,
         isDynamic,
-        isLive,
+        liveConfiguration,
         windowDefaultStartPositionUs,
         windowDurationUs,
         /* firstPeriodIndex= */ 0,

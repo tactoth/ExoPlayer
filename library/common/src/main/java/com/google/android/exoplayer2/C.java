@@ -24,15 +24,14 @@ import android.media.MediaFormat;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.UUID;
 
-/**
- * Defines constants used by the library.
- */
+/** Defines constants used by the library. */
 @SuppressWarnings("InlinedApi")
 public final class C {
 
@@ -60,9 +59,10 @@ public final class C {
    */
   public static final int POSITION_UNSET = -1;
 
-  /**
-   * Represents an unset or unknown length.
-   */
+  /** Represents an unset or unknown rate. */
+  public static final float RATE_UNSET = -Float.MAX_VALUE;
+
+  /** Represents an unset or unknown length. */
   public static final int LENGTH_UNSET = -1;
 
   /** Represents an unset or unknown percentage. */
@@ -253,8 +253,7 @@ public final class C {
   /**
    * Stream types for an {@link android.media.AudioTrack}. One of {@link #STREAM_TYPE_ALARM}, {@link
    * #STREAM_TYPE_DTMF}, {@link #STREAM_TYPE_MUSIC}, {@link #STREAM_TYPE_NOTIFICATION}, {@link
-   * #STREAM_TYPE_RING}, {@link #STREAM_TYPE_SYSTEM}, {@link #STREAM_TYPE_VOICE_CALL} or {@link
-   * #STREAM_TYPE_USE_DEFAULT}.
+   * #STREAM_TYPE_RING}, {@link #STREAM_TYPE_SYSTEM} or {@link #STREAM_TYPE_VOICE_CALL}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -265,8 +264,7 @@ public final class C {
     STREAM_TYPE_NOTIFICATION,
     STREAM_TYPE_RING,
     STREAM_TYPE_SYSTEM,
-    STREAM_TYPE_VOICE_CALL,
-    STREAM_TYPE_USE_DEFAULT
+    STREAM_TYPE_VOICE_CALL
   })
   public @interface StreamType {}
   /**
@@ -297,13 +295,7 @@ public final class C {
    * @see AudioManager#STREAM_VOICE_CALL
    */
   public static final int STREAM_TYPE_VOICE_CALL = AudioManager.STREAM_VOICE_CALL;
-  /**
-   * @see AudioManager#USE_DEFAULT_STREAM_TYPE
-   */
-  public static final int STREAM_TYPE_USE_DEFAULT = AudioManager.USE_DEFAULT_STREAM_TYPE;
-  /**
-   * The default stream type used by audio renderers.
-   */
+  /** The default stream type used by audio renderers. Equal to {@link #STREAM_TYPE_MUSIC}. */
   public static final int STREAM_TYPE_DEFAULT = STREAM_TYPE_MUSIC;
 
   /**
@@ -559,28 +551,25 @@ public final class C {
   /** Video decoder output mode that renders 4:2:0 YUV planes directly to a surface. */
   public static final int VIDEO_OUTPUT_MODE_SURFACE_YUV = 1;
   // LINT.ThenChange(
-  //     ../../../../../../../../../extensions/av1/src/main/jni/gav1_jni.cc,
-  //     ../../../../../../../../../extensions/vp9/src/main/jni/vpx_jni.cc
+  //     ../../../../../../../../../../../media/libraries/decoder_av1/src/main/jni/gav1_jni.cc,
+  //     ../../../../../../../../../../../media/libraries/decoder_vp9/src/main/jni/vpx_jni.cc
   // )
 
-  /** @deprecated Use {@code Renderer.VideoScalingMode}. */
-  @SuppressWarnings("deprecation")
+  /**
+   * Video scaling modes for {@link MediaCodec}-based renderers. One of {@link
+   * #VIDEO_SCALING_MODE_SCALE_TO_FIT} or {@link #VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}.
+   */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
   @IntDef(value = {VIDEO_SCALING_MODE_SCALE_TO_FIT, VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING})
-  @Deprecated
   public @interface VideoScalingMode {}
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
-  @Deprecated
+  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT}. */
   public static final int VIDEO_SCALING_MODE_SCALE_TO_FIT =
       MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
-  @Deprecated
+  /** See {@link MediaCodec#VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING}. */
   public static final int VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING =
       MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING;
-  /** @deprecated Use {@code Renderer.VIDEO_SCALING_MODE_DEFAULT}. */
-  @SuppressWarnings("deprecation")
-  @Deprecated
+  /** A default video scaling mode for {@link MediaCodec}-based renderers. */
   public static final int VIDEO_SCALING_MODE_DEFAULT = VIDEO_SCALING_MODE_SCALE_TO_FIT;
 
   /**
@@ -597,7 +586,15 @@ public final class C {
    * Indicates that the track should be selected if user preferences do not state otherwise.
    */
   public static final int SELECTION_FLAG_DEFAULT = 1;
-  /** Indicates that the track must be displayed. Only applies to text tracks. */
+  /**
+   * Indicates that the track should be selected if its language matches the language of the
+   * selected audio track and user preferences do not state otherwise. Only applies to text tracks.
+   *
+   * <p>Tracks with this flag generally provide translation for elements that don't match the
+   * declared language of the selected audio track (e.g. speech in an alien language). See <a
+   * href="https://partnerhelp.netflixstudios.com/hc/en-us/articles/217558918">Netflix's summary</a>
+   * for more info.
+   */
   public static final int SELECTION_FLAG_FORCED = 1 << 1; // 2
   /**
    * Indicates that the player may choose to play the track in absence of an explicit user
@@ -610,11 +607,11 @@ public final class C {
 
   /**
    * Represents a streaming or other media type. One of {@link #TYPE_DASH}, {@link #TYPE_SS}, {@link
-   * #TYPE_HLS} or {@link #TYPE_OTHER}.
+   * #TYPE_HLS}, {@link #TYPE_RTSP} or {@link #TYPE_OTHER}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
-  @IntDef({TYPE_DASH, TYPE_SS, TYPE_HLS, TYPE_OTHER})
+  @IntDef({TYPE_DASH, TYPE_SS, TYPE_HLS, TYPE_RTSP, TYPE_OTHER})
   public @interface ContentType {}
   /**
    * Value returned by {@link Util#inferContentType(String)} for DASH manifests.
@@ -628,11 +625,13 @@ public final class C {
    * Value returned by {@link Util#inferContentType(String)} for HLS manifests.
    */
   public static final int TYPE_HLS = 2;
+  /** Value returned by {@link Util#inferContentType(String)} for RTSP. */
+  public static final int TYPE_RTSP = 3;
   /**
    * Value returned by {@link Util#inferContentType(String)} for files other than DASH, HLS or
-   * Smooth Streaming manifests.
+   * Smooth Streaming manifests, or RTSP URIs.
    */
-  public static final int TYPE_OTHER = 3;
+  public static final int TYPE_OTHER = 4;
 
   /**
    * A return value for methods where the end of an input was encountered.
@@ -689,12 +688,14 @@ public final class C {
   public static final int TRACK_TYPE_VIDEO = 2;
   /** A type constant for text tracks. */
   public static final int TRACK_TYPE_TEXT = 3;
+  /** A type constant for image tracks. */
+  public static final int TRACK_TYPE_IMAGE = 4;
   /** A type constant for metadata tracks. */
-  public static final int TRACK_TYPE_METADATA = 4;
+  public static final int TRACK_TYPE_METADATA = 5;
   /** A type constant for camera motion tracks. */
-  public static final int TRACK_TYPE_CAMERA_MOTION = 5;
+  public static final int TRACK_TYPE_CAMERA_MOTION = 6;
   /** A type constant for a fake or empty track. */
-  public static final int TRACK_TYPE_NONE = 6;
+  public static final int TRACK_TYPE_NONE = 7;
   /**
    * Applications or extensions may define custom {@code TRACK_TYPE_*} constants greater than or
    * equal to this value.
@@ -781,7 +782,7 @@ public final class C {
    */
   public static final UUID PLAYREADY_UUID = new UUID(0x9A04F07998404286L, 0xAB92E65BE0885F95L);
 
-  /** @deprecated Use {@code Renderer.MSG_SET_SURFACE}. */
+  /** @deprecated Use {@code Renderer.MSG_SET_VIDEO_OUTPUT}. */
   @Deprecated public static final int MSG_SET_SURFACE = 1;
 
   /** @deprecated Use {@code Renderer.MSG_SET_VOLUME}. */
@@ -801,9 +802,6 @@ public final class C {
 
   /** @deprecated Use {@code Renderer.MSG_SET_CAMERA_MOTION_LISTENER}. */
   @Deprecated public static final int MSG_SET_CAMERA_MOTION_LISTENER = 7;
-
-  /** @deprecated Use {@code Renderer.MSG_SET_VIDEO_DECODER_OUTPUT_BUFFER_RENDERER}. */
-  @Deprecated public static final int MSG_SET_VIDEO_DECODER_OUTPUT_BUFFER_RENDERER = 8;
 
   /** @deprecated Use {@code Renderer.MSG_CUSTOM_BASE}. */
   @Deprecated public static final int MSG_CUSTOM_BASE = 10000;
@@ -937,8 +935,8 @@ public final class C {
   /**
    * Network connection type. One of {@link #NETWORK_TYPE_UNKNOWN}, {@link #NETWORK_TYPE_OFFLINE},
    * {@link #NETWORK_TYPE_WIFI}, {@link #NETWORK_TYPE_2G}, {@link #NETWORK_TYPE_3G}, {@link
-   * #NETWORK_TYPE_4G}, {@link #NETWORK_TYPE_5G}, {@link #NETWORK_TYPE_CELLULAR_UNKNOWN}, {@link
-   * #NETWORK_TYPE_ETHERNET} or {@link #NETWORK_TYPE_OTHER}.
+   * #NETWORK_TYPE_4G}, {@link #NETWORK_TYPE_5G_SA}, {@link #NETWORK_TYPE_5G_NSA}, {@link
+   * #NETWORK_TYPE_CELLULAR_UNKNOWN}, {@link #NETWORK_TYPE_ETHERNET} or {@link #NETWORK_TYPE_OTHER}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -949,7 +947,8 @@ public final class C {
     NETWORK_TYPE_2G,
     NETWORK_TYPE_3G,
     NETWORK_TYPE_4G,
-    NETWORK_TYPE_5G,
+    NETWORK_TYPE_5G_SA,
+    NETWORK_TYPE_5G_NSA,
     NETWORK_TYPE_CELLULAR_UNKNOWN,
     NETWORK_TYPE_ETHERNET,
     NETWORK_TYPE_OTHER
@@ -967,8 +966,10 @@ public final class C {
   public static final int NETWORK_TYPE_3G = 4;
   /** Network type for a 4G cellular connection. */
   public static final int NETWORK_TYPE_4G = 5;
-  /** Network type for a 5G cellular connection. */
-  public static final int NETWORK_TYPE_5G = 9;
+  /** Network type for a 5G stand-alone (SA) cellular connection. */
+  public static final int NETWORK_TYPE_5G_SA = 9;
+  /** Network type for a 5G non-stand-alone (NSA) cellular connection. */
+  public static final int NETWORK_TYPE_5G_NSA = 10;
   /**
    * Network type for cellular connections which cannot be mapped to one of {@link
    * #NETWORK_TYPE_2G}, {@link #NETWORK_TYPE_3G}, or {@link #NETWORK_TYPE_4G}.
@@ -1088,8 +1089,63 @@ public final class C {
   public static final int ROLE_FLAG_TRICK_PLAY = 1 << 14;
 
   /**
-   * Converts a time in microseconds to the corresponding time in milliseconds, preserving
-   * {@link #TIME_UNSET} and {@link #TIME_END_OF_SOURCE} values.
+   * Level of renderer support for a format. One of {@link #FORMAT_HANDLED}, {@link
+   * #FORMAT_EXCEEDS_CAPABILITIES}, {@link #FORMAT_UNSUPPORTED_DRM}, {@link
+   * #FORMAT_UNSUPPORTED_SUBTYPE} or {@link #FORMAT_UNSUPPORTED_TYPE}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef({
+    FORMAT_HANDLED,
+    FORMAT_EXCEEDS_CAPABILITIES,
+    FORMAT_UNSUPPORTED_DRM,
+    FORMAT_UNSUPPORTED_SUBTYPE,
+    FORMAT_UNSUPPORTED_TYPE
+  })
+  public static @interface FormatSupport {}
+  // TODO(b/172315872) Renderer was a link. Link to equivalent concept or remove @code.
+  /** The {@code Renderer} is capable of rendering the format. */
+  public static final int FORMAT_HANDLED = 0b100;
+  /**
+   * The {@code Renderer} is capable of rendering formats with the same MIME type, but the
+   * properties of the format exceed the renderer's capabilities. There is a chance the renderer
+   * will be able to play the format in practice because some renderers report their capabilities
+   * conservatively, but the expected outcome is that playback will fail.
+   *
+   * <p>Example: The {@code Renderer} is capable of rendering H264 and the format's MIME type is
+   * {@code MimeTypes#VIDEO_H264}, but the format's resolution exceeds the maximum limit supported
+   * by the underlying H264 decoder.
+   */
+  public static final int FORMAT_EXCEEDS_CAPABILITIES = 0b011;
+  /**
+   * The {@code Renderer} is capable of rendering formats with the same MIME type, but is not
+   * capable of rendering the format because the format's drm protection is not supported.
+   *
+   * <p>Example: The {@code Renderer} is capable of rendering H264 and the format's MIME type is
+   * {@link MimeTypes#VIDEO_H264}, but the format indicates PlayReady drm protection whereas the
+   * renderer only supports Widevine.
+   */
+  public static final int FORMAT_UNSUPPORTED_DRM = 0b010;
+  /**
+   * The {@code Renderer} is a general purpose renderer for formats of the same top-level type, but
+   * is not capable of rendering the format or any other format with the same MIME type because the
+   * sub-type is not supported.
+   *
+   * <p>Example: The {@code Renderer} is a general purpose audio renderer and the format's MIME type
+   * matches audio/[subtype], but there does not exist a suitable decoder for [subtype].
+   */
+  public static final int FORMAT_UNSUPPORTED_SUBTYPE = 0b001;
+  /**
+   * The {@code Renderer} is not capable of rendering the format, either because it does not support
+   * the format's top-level type, or because it's a specialized renderer for a different MIME type.
+   *
+   * <p>Example: The {@code Renderer} is a general purpose video renderer, but the format has an
+   * audio MIME type.
+   */
+  public static final int FORMAT_UNSUPPORTED_TYPE = 0b000;
+  /**
+   * Converts a time in microseconds to the corresponding time in milliseconds, preserving {@link
+   * #TIME_UNSET} and {@link #TIME_END_OF_SOURCE} values.
    *
    * @param timeUs The time in microseconds.
    * @return The corresponding time in milliseconds.
@@ -1122,4 +1178,26 @@ public final class C {
     return audioManager == null ? AudioManager.ERROR : audioManager.generateAudioSessionId();
   }
 
+  /**
+   * Returns string representation of a {@link FormatSupport} flag.
+   *
+   * @param formatSupport A {@link FormatSupport} flag.
+   * @return A string representation of the flag.
+   */
+  public static String getFormatSupportString(@FormatSupport int formatSupport) {
+    switch (formatSupport) {
+      case FORMAT_HANDLED:
+        return "YES";
+      case FORMAT_EXCEEDS_CAPABILITIES:
+        return "NO_EXCEEDS_CAPABILITIES";
+      case FORMAT_UNSUPPORTED_DRM:
+        return "NO_UNSUPPORTED_DRM";
+      case FORMAT_UNSUPPORTED_SUBTYPE:
+        return "NO_UNSUPPORTED_TYPE";
+      case FORMAT_UNSUPPORTED_TYPE:
+        return "NO";
+      default:
+        throw new IllegalStateException();
+    }
+  }
 }

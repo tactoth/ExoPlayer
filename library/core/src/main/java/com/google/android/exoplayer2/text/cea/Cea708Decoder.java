@@ -41,12 +41,11 @@ import com.google.android.exoplayer2.util.ParsableByteArray;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
-/**
- * A {@link SubtitleDecoder} for CEA-708 (also known as "EIA-708").
- */
+/** A {@link SubtitleDecoder} for CEA-708 (also known as "EIA-708"). */
 public final class Cea708Decoder extends CeaDecoder {
 
   private static final String TAG = "Cea708Decoder";
@@ -145,6 +144,7 @@ public final class Cea708Decoder extends CeaDecoder {
 
   private final ParsableByteArray ccData;
   private final ParsableBitArray serviceBlockPacket;
+  private int previousSequenceNumber;
   // TODO: Use isWideAspectRatio in decoding.
   @SuppressWarnings({"unused", "FieldCanBeLocal"})
   private final boolean isWideAspectRatio;
@@ -162,6 +162,7 @@ public final class Cea708Decoder extends CeaDecoder {
   public Cea708Decoder(int accessibilityChannel, @Nullable List<byte[]> initializationData) {
     ccData = new ParsableByteArray();
     serviceBlockPacket = new ParsableBitArray();
+    previousSequenceNumber = C.INDEX_UNSET;
     selectedServiceNumber = accessibilityChannel == Format.NO_VALUE ? 1 : accessibilityChannel;
     isWideAspectRatio =
         initializationData != null
@@ -231,6 +232,18 @@ public final class Cea708Decoder extends CeaDecoder {
         finalizeCurrentPacket();
 
         int sequenceNumber = (ccData1 & 0xC0) >> 6; // first 2 bits
+        if (previousSequenceNumber != C.INDEX_UNSET
+            && sequenceNumber != (previousSequenceNumber + 1) % 4) {
+          resetCueBuilders();
+          Log.w(
+              TAG,
+              "Sequence number discontinuity. previous="
+                  + previousSequenceNumber
+                  + " current="
+                  + sequenceNumber);
+        }
+        previousSequenceNumber = sequenceNumber;
+
         int packetSize = ccData1 & 0x3F; // last 6 bits
         if (packetSize == 0) {
           packetSize = 64;
@@ -270,10 +283,18 @@ public final class Cea708Decoder extends CeaDecoder {
   @RequiresNonNull("currentDtvCcPacket")
   private void processCurrentPacket() {
     if (currentDtvCcPacket.currentIndex != (currentDtvCcPacket.packetSize * 2 - 1)) {
-      Log.w(TAG, "DtvCcPacket ended prematurely; size is " + (currentDtvCcPacket.packetSize * 2 - 1)
-          + ", but current index is " + currentDtvCcPacket.currentIndex + " (sequence number "
-          + currentDtvCcPacket.sequenceNumber + "); ignoring packet");
-      return;
+      Log.d(
+          TAG,
+          "DtvCcPacket ended prematurely; size is "
+              + (currentDtvCcPacket.packetSize * 2 - 1)
+              + ", but current index is "
+              + currentDtvCcPacket.currentIndex
+              + " (sequence number "
+              + currentDtvCcPacket.sequenceNumber
+              + ");");
+      // We've received cc_type=0x03 (packet start) before receiving packetSize byte pairs of data.
+      // This might indicate a byte pair has been lost, but we'll still attempt to process the data
+      // we have received.
     }
 
     serviceBlockPacket.reset(currentDtvCcPacket.packetData, currentDtvCcPacket.currentIndex);
@@ -776,9 +797,7 @@ public final class Cea708Decoder extends CeaDecoder {
         }
       }
     }
-    Collections.sort(
-        displayCueInfos,
-        (thisInfo, thatInfo) -> Integer.compare(thisInfo.priority, thatInfo.priority));
+    Collections.sort(displayCueInfos, Cea708CueInfo.LEAST_IMPORTANT_FIRST);
     List<Cue> displayCues = new ArrayList<>(displayCueInfos.size());
     for (int i = 0; i < displayCueInfos.size(); i++) {
       displayCues.add(displayCueInfos.get(i).cue);
@@ -1226,18 +1245,18 @@ public final class Cea708Decoder extends CeaDecoder {
       //   |           |
       //   6-----7-----8
       @AnchorType int verticalAnchorType;
-      if (anchorId % 3 == 0) {
+      if (anchorId / 3 == 0) {
         verticalAnchorType = Cue.ANCHOR_TYPE_START;
-      } else if (anchorId % 3 == 1) {
+      } else if (anchorId / 3 == 1) {
         verticalAnchorType = Cue.ANCHOR_TYPE_MIDDLE;
       } else {
         verticalAnchorType = Cue.ANCHOR_TYPE_END;
       }
       // TODO: Add support for right-to-left languages (i.e. where start is on the right).
       @AnchorType int horizontalAnchorType;
-      if (anchorId / 3 == 0) {
+      if (anchorId % 3 == 0) {
         horizontalAnchorType = Cue.ANCHOR_TYPE_START;
-      } else if (anchorId / 3 == 1) {
+      } else if (anchorId % 3 == 1) {
         horizontalAnchorType = Cue.ANCHOR_TYPE_MIDDLE;
       } else {
         horizontalAnchorType = Cue.ANCHOR_TYPE_END;
@@ -1299,9 +1318,22 @@ public final class Cea708Decoder extends CeaDecoder {
   /** A {@link Cue} for CEA-708. */
   private static final class Cea708CueInfo {
 
+    /**
+     * Sorts cue infos in order of ascending {@link Cea708CueInfo#priority} (which is descending by
+     * numeric value).
+     */
+    private static final Comparator<Cea708CueInfo> LEAST_IMPORTANT_FIRST =
+        (thisInfo, thatInfo) -> Integer.compare(thatInfo.priority, thisInfo.priority);
+
     public final Cue cue;
 
-    /** The priority of the cue box. */
+    /**
+     * The priority of the cue box. Low values are higher priority.
+     *
+     * <p>If cue boxes overlap, higher priority cue boxes are drawn on top.
+     *
+     * <p>See 8.4.2 of the CEA-708B spec.
+     */
     public final int priority;
 
     /**

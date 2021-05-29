@@ -24,6 +24,7 @@ import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.Timeline.Window;
+import com.google.android.exoplayer2.source.ads.AdPlaybackState;
 import com.google.android.exoplayer2.upstream.Allocator;
 import com.google.android.exoplayer2.upstream.TransferListener;
 import com.google.android.exoplayer2.util.Assertions;
@@ -111,8 +112,8 @@ public final class MaskingMediaSource extends CompositeMediaSource<Void> {
   @Override
   public MaskingMediaPeriod createPeriod(
       MediaPeriodId id, Allocator allocator, long startPositionUs) {
-    MaskingMediaPeriod mediaPeriod =
-        new MaskingMediaPeriod(mediaSource, id, allocator, startPositionUs);
+    MaskingMediaPeriod mediaPeriod = new MaskingMediaPeriod(id, allocator, startPositionUs);
+    mediaPeriod.setMediaSource(mediaSource);
     if (isPrepared) {
       MediaPeriodId idInSource = id.copyWithPeriodUid(getInternalPeriodUid(id.periodUid));
       mediaPeriod.createPeriod(idInSource);
@@ -178,13 +179,17 @@ public final class MaskingMediaSource extends CompositeMediaSource<Void> {
       //     anyway.
       newTimeline.getWindow(/* windowIndex= */ 0, window);
       long windowStartPositionUs = window.getDefaultPositionUs();
+      Object windowUid = window.uid;
       if (unpreparedMaskingMediaPeriod != null) {
         long periodPreparePositionUs = unpreparedMaskingMediaPeriod.getPreparePositionUs();
-        if (periodPreparePositionUs != 0) {
-          windowStartPositionUs = periodPreparePositionUs;
+        timeline.getPeriodByUid(unpreparedMaskingMediaPeriod.id.periodUid, period);
+        long windowPreparePositionUs = period.getPositionInWindowUs() + periodPreparePositionUs;
+        long oldWindowDefaultPositionUs =
+            timeline.getWindow(/* windowIndex= */ 0, window).getDefaultPositionUs();
+        if (windowPreparePositionUs != oldWindowDefaultPositionUs) {
+          windowStartPositionUs = windowPreparePositionUs;
         }
       }
-      Object windowUid = window.uid;
       Pair<Object, Long> periodPosition =
           newTimeline.getPeriodPosition(
               window, period, /* windowIndex= */ 0, windowStartPositionUs);
@@ -374,7 +379,7 @@ public final class MaskingMediaSource extends CompositeMediaSource<Void> {
           /* isSeekable= */ false,
           // Dynamic window to indicate pending timeline updates.
           /* isDynamic= */ true,
-          /* isLive= */ false,
+          /* liveConfiguration= */ null,
           /* defaultPositionUs= */ 0,
           /* durationUs= */ C.TIME_UNSET,
           /* firstPeriodIndex= */ 0,
@@ -391,12 +396,15 @@ public final class MaskingMediaSource extends CompositeMediaSource<Void> {
 
     @Override
     public Period getPeriod(int periodIndex, Period period, boolean setIds) {
-      return period.set(
+      period.set(
           /* id= */ setIds ? 0 : null,
           /* uid= */ setIds ? MaskingTimeline.MASKING_EXTERNAL_PERIOD_UID : null,
           /* windowIndex= */ 0,
           /* durationUs = */ C.TIME_UNSET,
-          /* positionInWindowUs= */ 0);
+          /* positionInWindowUs= */ 0,
+          /* adPlaybackState= */ AdPlaybackState.NONE,
+          /* isPlaceholder= */ true);
+      return period;
     }
 
     @Override

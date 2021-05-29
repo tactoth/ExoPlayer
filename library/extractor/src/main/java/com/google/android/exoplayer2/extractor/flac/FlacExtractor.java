@@ -75,7 +75,7 @@ public final class FlacExtractor implements Extractor {
    * required.
    */
   public static final int FLAG_DISABLE_ID3_METADATA = 1;
-  // LINT.ThenChange(../../../../../../../../../../../extensions/flac/src/main/java/com/google/android/exoplayer2/ext/flac/FlacExtractor.java)
+  // LINT.ThenChange(../../../../../../../../../../decoder_flac/src/main/java/com/google/android/exoplayer2/ext/flac/FlacExtractor.java)
 
   /** Parser state. */
   @Documented
@@ -303,13 +303,11 @@ public final class FlacExtractor implements Extractor {
     if (buffer.bytesLeft() < FlacConstants.MAX_FRAME_HEADER_SIZE) {
       // The next frame header may not fit in the rest of the buffer, so put the trailing bytes at
       // the start of the buffer, and reset the position and limit.
+      int bytesLeft = buffer.bytesLeft();
       System.arraycopy(
-          buffer.getData(),
-          buffer.getPosition(),
-          buffer.getData(),
-          /* destPos= */ 0,
-          buffer.bytesLeft());
-      buffer.reset(buffer.bytesLeft());
+          buffer.getData(), buffer.getPosition(), buffer.getData(), /* destPos= */ 0, bytesLeft);
+      buffer.setPosition(0);
+      buffer.setLimit(bytesLeft);
     }
 
     return Extractor.RESULT_CONTINUE;

@@ -15,9 +15,12 @@
  */
 package com.google.android.exoplayer2.audio;
 
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DISCARD_REASON_DRM_SESSION_CHANGED;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.DISCARD_REASON_REUSE_NOT_IMPLEMENTED;
+import static com.google.android.exoplayer2.decoder.DecoderReuseEvaluation.REUSE_RESULT_NO;
+import static com.google.android.exoplayer2.source.SampleStream.FLAG_REQUIRE_FORMAT;
 import static java.lang.Math.max;
 
-import android.media.audiofx.Virtualizer;
 import android.os.Handler;
 import android.os.SystemClock;
 import androidx.annotation.CallSuper;
@@ -38,12 +41,14 @@ import com.google.android.exoplayer2.decoder.Decoder;
 import com.google.android.exoplayer2.decoder.DecoderCounters;
 import com.google.android.exoplayer2.decoder.DecoderException;
 import com.google.android.exoplayer2.decoder.DecoderInputBuffer;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.decoder.SimpleOutputBuffer;
 import com.google.android.exoplayer2.drm.DrmSession;
 import com.google.android.exoplayer2.drm.DrmSession.DrmSessionException;
 import com.google.android.exoplayer2.drm.ExoMediaCrypto;
-import com.google.android.exoplayer2.source.SampleStream;
+import com.google.android.exoplayer2.source.SampleStream.ReadDataResult;
 import com.google.android.exoplayer2.util.Assertions;
+import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.MediaClock;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.TraceUtil;
@@ -78,6 +83,8 @@ public abstract class DecoderAudioRenderer<
         T extends
             Decoder<DecoderInputBuffer, ? extends SimpleOutputBuffer, ? extends DecoderException>>
     extends BaseRenderer implements MediaClock {
+
+  private static final String TAG = "DecoderAudioRenderer";
 
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -183,7 +190,7 @@ public abstract class DecoderAudioRenderer<
     eventDispatcher = new EventDispatcher(eventHandler, eventListener);
     this.audioSink = audioSink;
     audioSink.setListener(new AudioSinkListener());
-    flagsOnlyBuffer = DecoderInputBuffer.newFlagsOnlyInstance();
+    flagsOnlyBuffer = DecoderInputBuffer.newNoDataInstance();
     decoderReinitializationState = REINITIALIZATION_STATE_NONE;
     audioTrackNeedsConfigure = true;
   }
@@ -211,10 +218,10 @@ public abstract class DecoderAudioRenderer<
   @Capabilities
   public final int supportsFormat(Format format) {
     if (!MimeTypes.isAudio(format.sampleMimeType)) {
-      return RendererCapabilities.create(FORMAT_UNSUPPORTED_TYPE);
+      return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
     }
-    @FormatSupport int formatSupport = supportsFormatInternal(format);
-    if (formatSupport <= FORMAT_UNSUPPORTED_DRM) {
+    @C.FormatSupport int formatSupport = supportsFormatInternal(format);
+    if (formatSupport <= C.FORMAT_UNSUPPORTED_DRM) {
       return RendererCapabilities.create(formatSupport);
     }
     @TunnelingSupport
@@ -223,12 +230,12 @@ public abstract class DecoderAudioRenderer<
   }
 
   /**
-   * Returns the {@link FormatSupport} for the given {@link Format}.
+   * Returns the {@link C.FormatSupport} for the given {@link Format}.
    *
    * @param format The format, which has an audio {@link Format#sampleMimeType}.
-   * @return The {@link FormatSupport} for this {@link Format}.
+   * @return The {@link C.FormatSupport} for this {@link Format}.
    */
-  @FormatSupport
+  @C.FormatSupport
   protected abstract int supportsFormatInternal(Format format);
 
   /**
@@ -257,7 +264,7 @@ public abstract class DecoderAudioRenderer<
       try {
         audioSink.playToEndOfStream();
       } catch (AudioSink.WriteException e) {
-        throw createRendererException(e, inputFormat);
+        throw createRendererException(e, e.format, e.isRecoverable);
       }
       return;
     }
@@ -267,7 +274,7 @@ public abstract class DecoderAudioRenderer<
       // We don't have a format yet, so try and read one.
       FormatHolder formatHolder = getFormatHolder();
       flagsOnlyBuffer.clear();
-      @SampleStream.ReadDataResult int result = readSource(formatHolder, flagsOnlyBuffer, true);
+      @ReadDataResult int result = readSource(formatHolder, flagsOnlyBuffer, FLAG_REQUIRE_FORMAT);
       if (result == C.RESULT_FORMAT_READ) {
         onInputFormatChanged(formatHolder);
       } else if (result == C.RESULT_BUFFER_READ) {
@@ -296,26 +303,19 @@ public abstract class DecoderAudioRenderer<
         while (drainOutputBuffer()) {}
         while (feedInputBuffer()) {}
         TraceUtil.endSection();
-      } catch (DecoderException
-          | AudioSink.ConfigurationException
-          | AudioSink.InitializationException
-          | AudioSink.WriteException e) {
+      } catch (DecoderException e) {
+        Log.e(TAG, "Audio codec error", e);
+        eventDispatcher.audioCodecError(e);
         throw createRendererException(e, inputFormat);
+      } catch (AudioSink.ConfigurationException e) {
+        throw createRendererException(e, e.format);
+      } catch (AudioSink.InitializationException e) {
+        throw createRendererException(e, e.format, e.isRecoverable);
+      } catch (AudioSink.WriteException e) {
+        throw createRendererException(e, e.format, e.isRecoverable);
       }
       decoderCounters.ensureUpdated();
     }
-  }
-
-  /**
-   * Called when the audio session id becomes known. The default implementation is a no-op. One
-   * reason for overriding this method would be to instantiate and enable a {@link Virtualizer} in
-   * order to spatialize the audio channels. For this use case, any {@link Virtualizer} instances
-   * should be released in {@link #onDisabled()} (if not before).
-   *
-   * <p>See {@link AudioSink.Listener#onAudioSessionId(int)}.
-   */
-  protected void onAudioSessionId(int audioSessionId) {
-    // Do nothing.
   }
 
   /** See {@link AudioSink.Listener#onPositionDiscontinuity()}. */
@@ -346,14 +346,19 @@ public abstract class DecoderAudioRenderer<
   protected abstract Format getOutputFormat(T decoder);
 
   /**
-   * Returns whether the existing decoder can be kept for a new format.
+   * Evaluates whether the existing decoder can be reused for a new {@link Format}.
    *
+   * <p>The default implementation does not allow decoder reuse.
+   *
+   * @param decoderName The name of the decoder.
    * @param oldFormat The previous format.
    * @param newFormat The new format.
-   * @return Whether the existing decoder can be kept.
+   * @return The result of the evaluation.
    */
-  protected boolean canKeepCodec(Format oldFormat, Format newFormat) {
-    return false;
+  protected DecoderReuseEvaluation canReuseDecoder(
+      String decoderName, Format oldFormat, Format newFormat) {
+    return new DecoderReuseEvaluation(
+        decoderName, oldFormat, newFormat, REUSE_RESULT_NO, DISCARD_REASON_REUSE_NOT_IMPLEMENTED);
   }
 
   private boolean drainOutputBuffer()
@@ -383,7 +388,7 @@ public abstract class DecoderAudioRenderer<
         try {
           processEndOfStream();
         } catch (AudioSink.WriteException e) {
-          throw createRendererException(e, getOutputFormat(decoder));
+          throw createRendererException(e, e.format, e.isRecoverable);
         }
       }
       return false;
@@ -434,7 +439,7 @@ public abstract class DecoderAudioRenderer<
     }
 
     FormatHolder formatHolder = getFormatHolder();
-    switch (readSource(formatHolder, inputBuffer, /* formatRequired= */ false)) {
+    switch (readSource(formatHolder, inputBuffer, /* readFlags= */ 0)) {
       case C.RESULT_NOTHING_READ:
         return false;
       case C.RESULT_FORMAT_READ:
@@ -513,9 +518,8 @@ public abstract class DecoderAudioRenderer<
       throws ExoPlaybackException {
     decoderCounters = new DecoderCounters();
     eventDispatcher.enabled(decoderCounters);
-    int tunnelingAudioSessionId = getConfiguration().tunnelingAudioSessionId;
-    if (tunnelingAudioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-      audioSink.enableTunnelingV21(tunnelingAudioSessionId);
+    if (getConfiguration().tunneling) {
+      audioSink.enableTunnelingV21();
     } else {
       audioSink.disableTunneling();
     }
@@ -602,8 +606,8 @@ public abstract class DecoderAudioRenderer<
       if (mediaCrypto == null) {
         DrmSessionException drmError = decoderDrmSession.getError();
         if (drmError != null) {
-          // Continue for now. We may be able to avoid failure if the session recovers, or if a new
-          // input format causes the session to be replaced before it's used.
+          // Continue for now. We may be able to avoid failure if a new input format causes the
+          // session to be replaced without it having been used.
         } else {
           // The drm session isn't open yet.
           return;
@@ -621,6 +625,10 @@ public abstract class DecoderAudioRenderer<
           codecInitializedTimestamp - codecInitializingTimestamp);
       decoderCounters.decoderInitCount++;
     } catch (DecoderException e) {
+      Log.e(TAG, "Audio codec error", e);
+      eventDispatcher.audioCodecError(e);
+      throw createRendererException(e, inputFormat);
+    } catch (OutOfMemoryError e) {
       throw createRendererException(e, inputFormat);
     }
   }
@@ -631,9 +639,10 @@ public abstract class DecoderAudioRenderer<
     decoderReinitializationState = REINITIALIZATION_STATE_NONE;
     decoderReceivedBuffers = false;
     if (decoder != null) {
-      decoder.release();
-      decoder = null;
       decoderCounters.decoderReleaseCount++;
+      decoder.release();
+      eventDispatcher.decoderReleased(decoder.getName());
+      decoder = null;
     }
     setDecoderDrmSession(null);
   }
@@ -653,10 +662,29 @@ public abstract class DecoderAudioRenderer<
     setSourceDrmSession(formatHolder.drmSession);
     Format oldFormat = inputFormat;
     inputFormat = newFormat;
+    encoderDelay = newFormat.encoderDelay;
+    encoderPadding = newFormat.encoderPadding;
 
     if (decoder == null) {
       maybeInitDecoder();
-    } else if (sourceDrmSession != decoderDrmSession || !canKeepCodec(oldFormat, inputFormat)) {
+      eventDispatcher.inputFormatChanged(inputFormat, /* decoderReuseEvaluation= */ null);
+      return;
+    }
+
+    DecoderReuseEvaluation evaluation;
+    if (sourceDrmSession != decoderDrmSession) {
+      evaluation =
+          new DecoderReuseEvaluation(
+              decoder.getName(),
+              oldFormat,
+              newFormat,
+              REUSE_RESULT_NO,
+              DISCARD_REASON_DRM_SESSION_CHANGED);
+    } else {
+      evaluation = canReuseDecoder(decoder.getName(), oldFormat, newFormat);
+    }
+
+    if (evaluation.result == REUSE_RESULT_NO) {
       if (decoderReceivedBuffers) {
         // Signal end of stream and wait for any final output buffers before re-initialization.
         decoderReinitializationState = REINITIALIZATION_STATE_SIGNAL_END_OF_STREAM;
@@ -667,13 +695,10 @@ public abstract class DecoderAudioRenderer<
         audioTrackNeedsConfigure = true;
       }
     }
-
-    encoderDelay = inputFormat.encoderDelay;
-    encoderPadding = inputFormat.encoderPadding;
-    eventDispatcher.inputFormatChanged(inputFormat);
+    eventDispatcher.inputFormatChanged(inputFormat, evaluation);
   }
 
-  private void onQueueInputBuffer(DecoderInputBuffer buffer) {
+  protected void onQueueInputBuffer(DecoderInputBuffer buffer) {
     if (allowFirstBufferPositionDiscontinuity && !buffer.isDecodeOnly()) {
       // TODO: Remove this hack once we have a proper fix for [Internal: b/71876314].
       // Allow the position to jump if the first presentable input buffer has a timestamp that
@@ -699,12 +724,6 @@ public abstract class DecoderAudioRenderer<
   private final class AudioSinkListener implements AudioSink.Listener {
 
     @Override
-    public void onAudioSessionId(int audioSessionId) {
-      eventDispatcher.audioSessionId(audioSessionId);
-      DecoderAudioRenderer.this.onAudioSessionId(audioSessionId);
-    }
-
-    @Override
     public void onPositionDiscontinuity() {
       DecoderAudioRenderer.this.onPositionDiscontinuity();
     }
@@ -722,6 +741,12 @@ public abstract class DecoderAudioRenderer<
     @Override
     public void onSkipSilenceEnabledChanged(boolean skipSilenceEnabled) {
       eventDispatcher.skipSilenceEnabledChanged(skipSilenceEnabled);
+    }
+
+    @Override
+    public void onAudioSinkError(Exception audioSinkError) {
+      Log.e(TAG, "Audio sink error", audioSinkError);
+      eventDispatcher.audioSinkError(audioSinkError);
     }
   }
 }

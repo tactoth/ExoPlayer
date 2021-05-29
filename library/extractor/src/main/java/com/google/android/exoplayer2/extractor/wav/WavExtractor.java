@@ -37,9 +37,7 @@ import java.io.IOException;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
-/**
- * Extracts data from WAV byte streams.
- */
+/** Extracts data from WAV byte streams. */
 public final class WavExtractor implements Extractor {
 
   /**
@@ -472,7 +470,8 @@ public final class WavExtractor implements Extractor {
         }
       }
       int decodedDataSize = numOutputFramesToBytes(framesPerBlock * blockCount);
-      output.reset(decodedDataSize);
+      output.setPosition(0);
+      output.setLimit(decodedDataSize);
     }
 
     private void decodeBlockForChannel(

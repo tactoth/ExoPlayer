@@ -672,15 +672,13 @@ import com.google.common.collect.ImmutableList;
           period.getNextAdIndexToPlay(adGroupIndex, currentPeriodId.adIndexInAdGroup);
       if (nextAdIndexInAdGroup < adCountInCurrentAdGroup) {
         // Play the next ad in the ad group if it's available.
-        return !period.isAdAvailable(adGroupIndex, nextAdIndexInAdGroup)
-            ? null
-            : getMediaPeriodInfoForAd(
-                timeline,
-                currentPeriodId.periodUid,
-                adGroupIndex,
-                nextAdIndexInAdGroup,
-                mediaPeriodInfo.requestedContentPositionUs,
-                currentPeriodId.windowSequenceNumber);
+        return getMediaPeriodInfoForAd(
+            timeline,
+            currentPeriodId.periodUid,
+            adGroupIndex,
+            nextAdIndexInAdGroup,
+            mediaPeriodInfo.requestedContentPositionUs,
+            currentPeriodId.windowSequenceNumber);
       } else {
         // Play content from the ad group position.
         long startPositionUs = mediaPeriodInfo.requestedContentPositionUs;
@@ -708,10 +706,10 @@ import com.google.common.collect.ImmutableList;
             currentPeriodId.windowSequenceNumber);
       }
     } else {
-      // Play the next ad group if it's available.
-      int nextAdGroupIndex = period.getAdGroupIndexForPositionUs(mediaPeriodInfo.endPositionUs);
-      if (nextAdGroupIndex == C.INDEX_UNSET) {
-        // The next ad group can't be played. Play content from the previous end position instead.
+      // Play the next ad group if it's still available.
+      int adIndexInAdGroup = period.getFirstAdIndexToPlay(currentPeriodId.nextAdGroupIndex);
+      if (adIndexInAdGroup == period.getAdCountInAdGroup(currentPeriodId.nextAdGroupIndex)) {
+        // The next ad group has no ads left to play. Play content from the end position instead.
         return getMediaPeriodInfoForContent(
             timeline,
             currentPeriodId.periodUid,
@@ -719,16 +717,13 @@ import com.google.common.collect.ImmutableList;
             /* requestedContentPositionUs= */ mediaPeriodInfo.durationUs,
             currentPeriodId.windowSequenceNumber);
       }
-      int adIndexInAdGroup = period.getFirstAdIndexToPlay(nextAdGroupIndex);
-      return !period.isAdAvailable(nextAdGroupIndex, adIndexInAdGroup)
-          ? null
-          : getMediaPeriodInfoForAd(
-              timeline,
-              currentPeriodId.periodUid,
-              nextAdGroupIndex,
-              adIndexInAdGroup,
-              /* contentPositionUs= */ mediaPeriodInfo.durationUs,
-              currentPeriodId.windowSequenceNumber);
+      return getMediaPeriodInfoForAd(
+          timeline,
+          currentPeriodId.periodUid,
+          currentPeriodId.nextAdGroupIndex,
+          adIndexInAdGroup,
+          /* contentPositionUs= */ mediaPeriodInfo.durationUs,
+          currentPeriodId.windowSequenceNumber);
     }
   }
 
@@ -737,9 +732,6 @@ import com.google.common.collect.ImmutableList;
       Timeline timeline, MediaPeriodId id, long requestedContentPositionUs, long startPositionUs) {
     timeline.getPeriodByUid(id.periodUid, period);
     if (id.isAd()) {
-      if (!period.isAdAvailable(id.adGroupIndex, id.adIndexInAdGroup)) {
-        return null;
-      }
       return getMediaPeriodInfoForAd(
           timeline,
           id.periodUid,

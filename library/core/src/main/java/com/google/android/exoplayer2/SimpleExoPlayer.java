@@ -15,11 +15,23 @@
  */
 package com.google.android.exoplayer2;
 
+import static com.google.android.exoplayer2.Renderer.MSG_SET_AUDIO_ATTRIBUTES;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_AUDIO_SESSION_ID;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_AUX_EFFECT_INFO;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_CAMERA_MOTION_LISTENER;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_SCALING_MODE;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_SKIP_SILENCE_ENABLED;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_VIDEO_FRAME_METADATA_LISTENER;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_VIDEO_OUTPUT;
+import static com.google.android.exoplayer2.Renderer.MSG_SET_VOLUME;
+
 import android.content.Context;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
 import android.media.MediaCodec;
-import android.media.PlaybackParams;
+import android.media.MediaFormat;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Surface;
@@ -27,7 +39,6 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.TextureView;
 import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
 import com.google.android.exoplayer2.analytics.AnalyticsCollector;
 import com.google.android.exoplayer2.analytics.AnalyticsListener;
@@ -36,6 +47,7 @@ import com.google.android.exoplayer2.audio.AudioListener;
 import com.google.android.exoplayer2.audio.AudioRendererEventListener;
 import com.google.android.exoplayer2.audio.AuxEffectInfo;
 import com.google.android.exoplayer2.decoder.DecoderCounters;
+import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.device.DeviceInfo;
 import com.google.android.exoplayer2.device.DeviceListener;
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
@@ -56,13 +68,17 @@ import com.google.android.exoplayer2.upstream.BandwidthMeter;
 import com.google.android.exoplayer2.upstream.DefaultBandwidthMeter;
 import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.Clock;
+import com.google.android.exoplayer2.util.ConditionVariable;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.PriorityTaskManager;
 import com.google.android.exoplayer2.util.Util;
 import com.google.android.exoplayer2.video.VideoDecoderOutputBufferRenderer;
 import com.google.android.exoplayer2.video.VideoFrameMetadataListener;
+import com.google.android.exoplayer2.video.VideoListener;
 import com.google.android.exoplayer2.video.VideoRendererEventListener;
+import com.google.android.exoplayer2.video.VideoSize;
 import com.google.android.exoplayer2.video.spherical.CameraMotionListener;
+import com.google.android.exoplayer2.video.spherical.SphericalGLSurfaceView;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -75,15 +91,14 @@ import java.util.concurrent.TimeoutException;
  */
 public class SimpleExoPlayer extends BasePlayer
     implements ExoPlayer,
-        Player.AudioComponent,
-        Player.VideoComponent,
-        Player.TextComponent,
-        Player.MetadataComponent,
-        Player.DeviceComponent {
+    ExoPlayer.AudioComponent,
+    ExoPlayer.VideoComponent,
+    ExoPlayer.TextComponent,
+    ExoPlayer.MetadataComponent,
+    ExoPlayer.DeviceComponent {
 
-  /** @deprecated Use {@link com.google.android.exoplayer2.video.VideoListener}. */
-  @Deprecated
-  public interface VideoListener extends com.google.android.exoplayer2.video.VideoListener {}
+  /** The default timeout for detaching a surface from the player, in milliseconds. */
+  public static final long DEFAULT_DETACH_SURFACE_TIMEOUT_MS = 2_000;
 
   /**
    * A builder for {@link SimpleExoPlayer} instances.
@@ -96,6 +111,7 @@ public class SimpleExoPlayer extends BasePlayer
     private final RenderersFactory renderersFactory;
 
     private Clock clock;
+    private long foregroundModeTimeoutMs;
     private TrackSelector trackSelector;
     private MediaSourceFactory mediaSourceFactory;
     private LoadControl loadControl;
@@ -108,12 +124,13 @@ public class SimpleExoPlayer extends BasePlayer
     @C.WakeMode private int wakeMode;
     private boolean handleAudioBecomingNoisy;
     private boolean skipSilenceEnabled;
-    @Renderer.VideoScalingMode private int videoScalingMode;
+    @C.VideoScalingMode private int videoScalingMode;
     private boolean useLazyPreparation;
     private SeekParameters seekParameters;
-    private boolean pauseAtEndOfMediaItems;
+    private LivePlaybackSpeedControl livePlaybackSpeedControl;
     private long releaseTimeoutMs;
-    private boolean throwWhenStuckBuffering;
+    private long detachSurfaceTimeoutMs;
+    private boolean pauseAtEndOfMediaItems;
     private boolean buildCalled;
 
     /**
@@ -133,6 +150,7 @@ public class SimpleExoPlayer extends BasePlayer
      *   <li>{@link MediaSourceFactory}: {@link DefaultMediaSourceFactory}
      *   <li>{@link LoadControl}: {@link DefaultLoadControl}
      *   <li>{@link BandwidthMeter}: {@link DefaultBandwidthMeter#getSingletonInstance(Context)}
+     *   <li>{@link LivePlaybackSpeedControl}: {@link DefaultLivePlaybackSpeedControl}
      *   <li>{@link Looper}: The {@link Looper} associated with the current thread, or the {@link
      *       Looper} of the application's main thread if the current thread doesn't have a {@link
      *       Looper}
@@ -140,11 +158,13 @@ public class SimpleExoPlayer extends BasePlayer
      *   <li>{@link PriorityTaskManager}: {@code null} (not used)
      *   <li>{@link AudioAttributes}: {@link AudioAttributes#DEFAULT}, not handling audio focus
      *   <li>{@link C.WakeMode}: {@link C#WAKE_MODE_NONE}
-     *   <li>{@code handleAudioBecomingNoisy}: {@code true}
+     *   <li>{@code handleAudioBecomingNoisy}: {@code false}
      *   <li>{@code skipSilenceEnabled}: {@code false}
-     *   <li>{@link Renderer.VideoScalingMode}: {@link Renderer#VIDEO_SCALING_MODE_DEFAULT}
+     *   <li>{@link C.VideoScalingMode}: {@link C#VIDEO_SCALING_MODE_DEFAULT}
      *   <li>{@code useLazyPreparation}: {@code true}
      *   <li>{@link SeekParameters}: {@link SeekParameters#DEFAULT}
+     *   <li>{@code releaseTimeoutMs}: {@link ExoPlayer#DEFAULT_RELEASE_TIMEOUT_MS}
+     *   <li>{@code detachSurfaceTimeoutMs}: {@link #DEFAULT_DETACH_SURFACE_TIMEOUT_MS}
      *   <li>{@code pauseAtEndOfMediaItems}: {@code false}
      *   <li>{@link Clock}: {@link Clock#DEFAULT}
      * </ul>
@@ -237,11 +257,28 @@ public class SimpleExoPlayer extends BasePlayer
       looper = Util.getCurrentOrMainLooper();
       audioAttributes = AudioAttributes.DEFAULT;
       wakeMode = C.WAKE_MODE_NONE;
-      videoScalingMode = Renderer.VIDEO_SCALING_MODE_DEFAULT;
+      videoScalingMode = C.VIDEO_SCALING_MODE_DEFAULT;
       useLazyPreparation = true;
       seekParameters = SeekParameters.DEFAULT;
+      livePlaybackSpeedControl = new DefaultLivePlaybackSpeedControl.Builder().build();
       clock = Clock.DEFAULT;
-      throwWhenStuckBuffering = true;
+      releaseTimeoutMs = ExoPlayer.DEFAULT_RELEASE_TIMEOUT_MS;
+      detachSurfaceTimeoutMs = DEFAULT_DETACH_SURFACE_TIMEOUT_MS;
+    }
+
+    /**
+     * Set a limit on the time a call to {@link #setForegroundMode} can spend. If a call to {@link
+     * #setForegroundMode} takes more than {@code timeoutMs} milliseconds to complete, the player
+     * will raise an error via {@link Player.Listener#onPlayerError}.
+     *
+     * <p>This method is experimental, and will be renamed or removed in a future release.
+     *
+     * @param timeoutMs The time limit in milliseconds.
+     */
+    public Builder experimentalSetForegroundModeTimeoutMs(long timeoutMs) {
+      Assertions.checkState(!buildCalled);
+      foregroundModeTimeoutMs = timeoutMs;
+      return this;
     }
 
     /**
@@ -412,17 +449,17 @@ public class SimpleExoPlayer extends BasePlayer
     }
 
     /**
-     * Sets the {@link Renderer.VideoScalingMode} that will be used by the player.
+     * Sets the {@link C.VideoScalingMode} that will be used by the player.
      *
      * <p>Note that the scaling mode only applies if a {@link MediaCodec}-based video {@link
      * Renderer} is enabled and if the output surface is owned by a {@link
      * android.view.SurfaceView}.
      *
-     * @param videoScalingMode A {@link Renderer.VideoScalingMode}.
+     * @param videoScalingMode A {@link C.VideoScalingMode}.
      * @return This builder.
      * @throws IllegalStateException If {@link #build()} has already been called.
      */
-    public Builder setVideoScalingMode(@Renderer.VideoScalingMode int videoScalingMode) {
+    public Builder setVideoScalingMode(@C.VideoScalingMode int videoScalingMode) {
       Assertions.checkState(!buildCalled);
       this.videoScalingMode = videoScalingMode;
       return this;
@@ -459,11 +496,45 @@ public class SimpleExoPlayer extends BasePlayer
     }
 
     /**
+     * Sets a timeout for calls to {@link #release} and {@link #setForegroundMode}.
+     *
+     * <p>If a call to {@link #release} or {@link #setForegroundMode} takes more than {@code
+     * timeoutMs} to complete, the player will report an error via {@link
+     * Player.Listener#onPlayerError}.
+     *
+     * @param releaseTimeoutMs The release timeout, in milliseconds.
+     * @return This builder.
+     * @throws IllegalStateException If {@link #build()} has already been called.
+     */
+    public Builder setReleaseTimeoutMs(long releaseTimeoutMs) {
+      Assertions.checkState(!buildCalled);
+      this.releaseTimeoutMs = releaseTimeoutMs;
+      return this;
+    }
+
+    /**
+     * Sets a timeout for detaching a surface from the player.
+     *
+     * <p>If detaching a surface or replacing a surface takes more than {@code
+     * detachSurfaceTimeoutMs} to complete, the player will report an error via {@link
+     * Player.Listener#onPlayerError}.
+     *
+     * @param detachSurfaceTimeoutMs The timeout for detaching a surface, in milliseconds.
+     * @return This builder.
+     * @throws IllegalStateException If {@link #build()} has already been called.
+     */
+    public Builder setDetachSurfaceTimeoutMs(long detachSurfaceTimeoutMs) {
+      Assertions.checkState(!buildCalled);
+      this.detachSurfaceTimeoutMs = detachSurfaceTimeoutMs;
+      return this;
+    }
+
+    /**
      * Sets whether to pause playback at the end of each media item.
      *
      * <p>This means the player will pause at the end of each window in the current {@link
      * #getCurrentTimeline() timeline}. Listeners will be informed by a call to {@link
-     * Player.EventListener#onPlayWhenReadyChanged(boolean, int)} with the reason {@link
+     * Player.Listener#onPlayWhenReadyChanged(boolean, int)} with the reason {@link
      * Player#PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM} when this happens.
      *
      * @param pauseAtEndOfMediaItems Whether to pause playback at the end of each media item.
@@ -477,20 +548,16 @@ public class SimpleExoPlayer extends BasePlayer
     }
 
     /**
-     * Sets whether the player should throw when it detects it's stuck buffering.
+     * Sets the {@link LivePlaybackSpeedControl} that will control the playback speed when playing
+     * live streams, in order to maintain a steady target offset from the live stream edge.
      *
-     * <p>This method is experimental, and will be renamed or removed in a future release.
-     *
-     * @param throwWhenStuckBuffering Whether to throw when the player detects it's stuck buffering.
+     * @param livePlaybackSpeedControl The {@link LivePlaybackSpeedControl}.
      * @return This builder.
+     * @throws IllegalStateException If {@link #build()} has already been called.
      */
-    public Builder experimentalSetThrowWhenStuckBuffering(boolean throwWhenStuckBuffering) {
-      this.throwWhenStuckBuffering = throwWhenStuckBuffering;
-      return this;
-    }
-
-    public Builder setReleaseTimeoutMs(long releaseTimeoutMs) {
-      this.releaseTimeoutMs = releaseTimeoutMs;
+    public Builder setLivePlaybackSpeedControl(LivePlaybackSpeedControl livePlaybackSpeedControl) {
+      Assertions.checkState(!buildCalled);
+      this.livePlaybackSpeedControl = livePlaybackSpeedControl;
       return this;
     }
 
@@ -522,38 +589,37 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   private static final String TAG = "SimpleExoPlayer";
-  private static final String WRONG_THREAD_ERROR_MESSAGE =
-      "Player is accessed on the wrong thread. See "
-          + "https://exoplayer.dev/issues/player-accessed-on-wrong-thread";
 
   protected final Renderer[] renderers;
 
+  private final ConditionVariable constructorFinished;
+  private final Context applicationContext;
   private final ExoPlayerImpl player;
   private final ComponentListener componentListener;
-  private final CopyOnWriteArraySet<com.google.android.exoplayer2.video.VideoListener>
-      videoListeners;
+  private final FrameMetadataListener frameMetadataListener;
+  private final CopyOnWriteArraySet<VideoListener> videoListeners;
   private final CopyOnWriteArraySet<AudioListener> audioListeners;
   private final CopyOnWriteArraySet<TextOutput> textOutputs;
   private final CopyOnWriteArraySet<MetadataOutput> metadataOutputs;
   private final CopyOnWriteArraySet<DeviceListener> deviceListeners;
-  private final CopyOnWriteArraySet<VideoRendererEventListener> videoDebugListeners;
-  private final CopyOnWriteArraySet<AudioRendererEventListener> audioDebugListeners;
   private final AnalyticsCollector analyticsCollector;
   private final AudioBecomingNoisyManager audioBecomingNoisyManager;
   private final AudioFocusManager audioFocusManager;
   private final StreamVolumeManager streamVolumeManager;
   private final WakeLockManager wakeLockManager;
   private final WifiLockManager wifiLockManager;
+  private final long detachSurfaceTimeoutMs;
 
   @Nullable private Format videoFormat;
   @Nullable private Format audioFormat;
-
-  @Nullable private VideoDecoderOutputBufferRenderer videoDecoderOutputBufferRenderer;
-  @Nullable private Surface surface;
-  private boolean ownsSurface;
-  @Renderer.VideoScalingMode private int videoScalingMode;
+  @Nullable private AudioTrack keepSessionIdAudioTrack;
+  @Nullable private Object videoOutput;
+  @Nullable private Surface ownedSurface;
   @Nullable private SurfaceHolder surfaceHolder;
+  @Nullable private SphericalGLSurfaceView sphericalGLSurfaceView;
+  private boolean surfaceHolderSurfaceIsVideoOutput;
   @Nullable private TextureView textureView;
+  @C.VideoScalingMode private int videoScalingMode;
   private int surfaceWidth;
   private int surfaceHeight;
   @Nullable private DecoderCounters videoDecoderCounters;
@@ -571,6 +637,7 @@ public class SimpleExoPlayer extends BasePlayer
   private boolean isPriorityTaskManagerRegistered;
   private boolean playerReleased;
   private DeviceInfo deviceInfo;
+  private VideoSize videoSize;
 
   /** @deprecated Use the {@link Builder} and pass it to {@link #SimpleExoPlayer(Builder)}. */
   @Deprecated
@@ -599,83 +666,116 @@ public class SimpleExoPlayer extends BasePlayer
 
   /** @param builder The {@link Builder} to obtain all construction parameters. */
   protected SimpleExoPlayer(Builder builder) {
-    analyticsCollector = builder.analyticsCollector;
-    priorityTaskManager = builder.priorityTaskManager;
-    audioAttributes = builder.audioAttributes;
-    videoScalingMode = builder.videoScalingMode;
-    skipSilenceEnabled = builder.skipSilenceEnabled;
-    componentListener = new ComponentListener();
-    videoListeners = new CopyOnWriteArraySet<>();
-    audioListeners = new CopyOnWriteArraySet<>();
-    textOutputs = new CopyOnWriteArraySet<>();
-    metadataOutputs = new CopyOnWriteArraySet<>();
-    deviceListeners = new CopyOnWriteArraySet<>();
-    videoDebugListeners = new CopyOnWriteArraySet<>();
-    audioDebugListeners = new CopyOnWriteArraySet<>();
-    Handler eventHandler = new Handler(builder.looper);
-    renderers =
-        builder.renderersFactory.createRenderers(
-            eventHandler,
-            componentListener,
-            componentListener,
-            componentListener,
-            componentListener);
+    constructorFinished = new ConditionVariable();
+    try {
+      applicationContext = builder.context.getApplicationContext();
+      analyticsCollector = builder.analyticsCollector;
+      priorityTaskManager = builder.priorityTaskManager;
+      audioAttributes = builder.audioAttributes;
+      videoScalingMode = builder.videoScalingMode;
+      skipSilenceEnabled = builder.skipSilenceEnabled;
+      detachSurfaceTimeoutMs = builder.detachSurfaceTimeoutMs;
+      componentListener = new ComponentListener();
+      frameMetadataListener = new FrameMetadataListener();
+      videoListeners = new CopyOnWriteArraySet<>();
+      audioListeners = new CopyOnWriteArraySet<>();
+      textOutputs = new CopyOnWriteArraySet<>();
+      metadataOutputs = new CopyOnWriteArraySet<>();
+      deviceListeners = new CopyOnWriteArraySet<>();
+      Handler eventHandler = new Handler(builder.looper);
+      renderers =
+          builder.renderersFactory.createRenderers(
+              eventHandler,
+              componentListener,
+              componentListener,
+              componentListener,
+              componentListener);
 
-    // Set initial values.
-    audioVolume = 1;
-    audioSessionId = C.AUDIO_SESSION_ID_UNSET;
-    currentCues = Collections.emptyList();
+      // Set initial values.
+      audioVolume = 1;
+      if (Util.SDK_INT < 21) {
+        audioSessionId = initializeKeepSessionIdAudioTrack(C.AUDIO_SESSION_ID_UNSET);
+      } else {
+        audioSessionId = C.generateAudioSessionIdV21(applicationContext);
+      }
+      currentCues = Collections.emptyList();
+      throwsWhenUsingWrongThread = true;
 
-    // Build the player and associated objects.
-    player =
-        new ExoPlayerImpl(
-            renderers,
-            builder.trackSelector,
-            builder.mediaSourceFactory,
-            builder.loadControl,
-            builder.bandwidthMeter,
-            analyticsCollector,
-            builder.useLazyPreparation,
-            builder.seekParameters,
-            builder.pauseAtEndOfMediaItems,
-            builder.clock,
-            builder.looper);
-    if (builder.releaseTimeoutMs > 0) {
-      player.experimentalSetReleaseTimeoutMs(builder.releaseTimeoutMs);
+      // Build the player and associated objects.
+      Commands additionalPermanentAvailableCommands =
+          new Commands.Builder()
+              .addAll(
+                  COMMAND_GET_AUDIO_ATTRIBUTES,
+                  COMMAND_GET_VOLUME,
+                  COMMAND_GET_DEVICE_VOLUME,
+                  COMMAND_SET_VOLUME,
+                  COMMAND_SET_DEVICE_VOLUME,
+                  COMMAND_ADJUST_DEVICE_VOLUME,
+                  COMMAND_SET_VIDEO_SURFACE,
+                  COMMAND_GET_TEXT)
+              .build();
+      player =
+          new ExoPlayerImpl(
+              renderers,
+              builder.trackSelector,
+              builder.mediaSourceFactory,
+              builder.loadControl,
+              builder.bandwidthMeter,
+              analyticsCollector,
+              builder.useLazyPreparation,
+              builder.seekParameters,
+              builder.livePlaybackSpeedControl,
+              builder.releaseTimeoutMs,
+              builder.pauseAtEndOfMediaItems,
+              builder.clock,
+              builder.looper,
+              /* wrappingPlayer= */ this,
+              additionalPermanentAvailableCommands);
+      player.addListener(componentListener);
+      player.addAudioOffloadListener(componentListener);
+      if (builder.foregroundModeTimeoutMs > 0) {
+        player.experimentalSetForegroundModeTimeoutMs(builder.foregroundModeTimeoutMs);
+      }
+
+      audioBecomingNoisyManager =
+          new AudioBecomingNoisyManager(builder.context, eventHandler, componentListener);
+      audioBecomingNoisyManager.setEnabled(builder.handleAudioBecomingNoisy);
+      audioFocusManager = new AudioFocusManager(builder.context, eventHandler, componentListener);
+      audioFocusManager.setAudioAttributes(builder.handleAudioFocus ? audioAttributes : null);
+      streamVolumeManager =
+          new StreamVolumeManager(builder.context, eventHandler, componentListener);
+      streamVolumeManager.setStreamType(Util.getStreamTypeForAudioUsage(audioAttributes.usage));
+      wakeLockManager = new WakeLockManager(builder.context);
+      wakeLockManager.setEnabled(builder.wakeMode != C.WAKE_MODE_NONE);
+      wifiLockManager = new WifiLockManager(builder.context);
+      wifiLockManager.setEnabled(builder.wakeMode == C.WAKE_MODE_NETWORK);
+      deviceInfo = createDeviceInfo(streamVolumeManager);
+      videoSize = VideoSize.UNKNOWN;
+
+      sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_AUDIO_SESSION_ID, audioSessionId);
+      sendRendererMessage(C.TRACK_TYPE_VIDEO, MSG_SET_AUDIO_SESSION_ID, audioSessionId);
+      sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_AUDIO_ATTRIBUTES, audioAttributes);
+      sendRendererMessage(C.TRACK_TYPE_VIDEO, MSG_SET_SCALING_MODE, videoScalingMode);
+      sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_SKIP_SILENCE_ENABLED, skipSilenceEnabled);
+      sendRendererMessage(
+          C.TRACK_TYPE_VIDEO, MSG_SET_VIDEO_FRAME_METADATA_LISTENER, frameMetadataListener);
+      sendRendererMessage(
+          C.TRACK_TYPE_CAMERA_MOTION, MSG_SET_CAMERA_MOTION_LISTENER, frameMetadataListener);
+    } finally {
+      constructorFinished.open();
     }
-
-    player.addListener(componentListener);
-    videoDebugListeners.add(analyticsCollector);
-    videoListeners.add(analyticsCollector);
-    audioDebugListeners.add(analyticsCollector);
-    audioListeners.add(analyticsCollector);
-    addMetadataOutput(analyticsCollector);
-
-    audioBecomingNoisyManager =
-        new AudioBecomingNoisyManager(builder.context, eventHandler, componentListener);
-    audioBecomingNoisyManager.setEnabled(builder.handleAudioBecomingNoisy);
-    audioFocusManager = new AudioFocusManager(builder.context, eventHandler, componentListener);
-    audioFocusManager.setAudioAttributes(builder.handleAudioFocus ? audioAttributes : null);
-    streamVolumeManager = new StreamVolumeManager(builder.context, eventHandler, componentListener);
-    streamVolumeManager.setStreamType(Util.getStreamTypeForAudioUsage(audioAttributes.usage));
-    wakeLockManager = new WakeLockManager(builder.context);
-    wakeLockManager.setEnabled(builder.wakeMode != C.WAKE_MODE_NONE);
-    wifiLockManager = new WifiLockManager(builder.context);
-    wifiLockManager.setEnabled(builder.wakeMode == C.WAKE_MODE_NETWORK);
-    deviceInfo = createDeviceInfo(streamVolumeManager);
-    if (!builder.throwWhenStuckBuffering) {
-      player.experimentalDisableThrowWhenStuckBuffering();
-    }
-
-    sendRendererMessage(C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_AUDIO_ATTRIBUTES, audioAttributes);
-    sendRendererMessage(C.TRACK_TYPE_VIDEO, Renderer.MSG_SET_SCALING_MODE, videoScalingMode);
-    sendRendererMessage(
-        C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_SKIP_SILENCE_ENABLED, skipSilenceEnabled);
   }
 
   @Override
   public void experimentalSetOffloadSchedulingEnabled(boolean offloadSchedulingEnabled) {
+    verifyApplicationThread();
     player.experimentalSetOffloadSchedulingEnabled(offloadSchedulingEnabled);
+  }
+
+  @Override
+  public boolean experimentalIsSleepingForOffload() {
+    verifyApplicationThread();
+    return player.experimentalIsSleepingForOffload();
   }
 
   @Override
@@ -714,33 +814,38 @@ public class SimpleExoPlayer extends BasePlayer
    * <p>Note that the scaling mode only applies if a {@link MediaCodec}-based video {@link Renderer}
    * is enabled and if the output surface is owned by a {@link android.view.SurfaceView}.
    *
-   * @param videoScalingMode The {@link Renderer.VideoScalingMode}.
+   * @param videoScalingMode The {@link C.VideoScalingMode}.
    */
   @Override
-  public void setVideoScalingMode(@Renderer.VideoScalingMode int videoScalingMode) {
+  public void setVideoScalingMode(@C.VideoScalingMode int videoScalingMode) {
     verifyApplicationThread();
     this.videoScalingMode = videoScalingMode;
-    sendRendererMessage(C.TRACK_TYPE_VIDEO, Renderer.MSG_SET_SCALING_MODE, videoScalingMode);
+    sendRendererMessage(C.TRACK_TYPE_VIDEO, MSG_SET_SCALING_MODE, videoScalingMode);
   }
 
   @Override
-  @Renderer.VideoScalingMode
+  @C.VideoScalingMode
   public int getVideoScalingMode() {
     return videoScalingMode;
+  }
+
+  @Override
+  public VideoSize getVideoSize() {
+    return videoSize;
   }
 
   @Override
   public void clearVideoSurface() {
     verifyApplicationThread();
     removeSurfaceCallbacks();
-    setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ false);
+    setVideoOutputInternal(/* videoOutput= */ null);
     maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
   }
 
   @Override
   public void clearVideoSurface(@Nullable Surface surface) {
     verifyApplicationThread();
-    if (surface != null && surface == this.surface) {
+    if (surface != null && surface == videoOutput) {
       clearVideoSurface();
     }
   }
@@ -749,10 +854,7 @@ public class SimpleExoPlayer extends BasePlayer
   public void setVideoSurface(@Nullable Surface surface) {
     verifyApplicationThread();
     removeSurfaceCallbacks();
-    if (surface != null) {
-      clearVideoDecoderOutputBufferRenderer();
-    }
-    setVideoSurfaceInternal(surface, /* ownsSurface= */ false);
+    setVideoOutputInternal(surface);
     int newSurfaceSize = surface == null ? 0 : C.LENGTH_UNSET;
     maybeNotifySurfaceSizeChanged(/* width= */ newSurfaceSize, /* height= */ newSurfaceSize);
   }
@@ -760,23 +862,20 @@ public class SimpleExoPlayer extends BasePlayer
   @Override
   public void setVideoSurfaceHolder(@Nullable SurfaceHolder surfaceHolder) {
     verifyApplicationThread();
-    removeSurfaceCallbacks();
-    if (surfaceHolder != null) {
-      clearVideoDecoderOutputBufferRenderer();
-    }
-    this.surfaceHolder = surfaceHolder;
     if (surfaceHolder == null) {
-      setVideoSurfaceInternal(null, /* ownsSurface= */ false);
-      maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
+      clearVideoSurface();
     } else {
+      removeSurfaceCallbacks();
+      this.surfaceHolderSurfaceIsVideoOutput = true;
+      this.surfaceHolder = surfaceHolder;
       surfaceHolder.addCallback(componentListener);
       Surface surface = surfaceHolder.getSurface();
       if (surface != null && surface.isValid()) {
-        setVideoSurfaceInternal(surface, /* ownsSurface= */ false);
+        setVideoOutputInternal(surface);
         Rect surfaceSize = surfaceHolder.getSurfaceFrame();
         maybeNotifySurfaceSizeChanged(surfaceSize.width(), surfaceSize.height());
       } else {
-        setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ false);
+        setVideoOutputInternal(/* videoOutput= */ null);
         maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
       }
     }
@@ -786,43 +885,59 @@ public class SimpleExoPlayer extends BasePlayer
   public void clearVideoSurfaceHolder(@Nullable SurfaceHolder surfaceHolder) {
     verifyApplicationThread();
     if (surfaceHolder != null && surfaceHolder == this.surfaceHolder) {
-      setVideoSurfaceHolder(null);
+      clearVideoSurface();
     }
   }
 
   @Override
   public void setVideoSurfaceView(@Nullable SurfaceView surfaceView) {
-    setVideoSurfaceHolder(surfaceView == null ? null : surfaceView.getHolder());
+    verifyApplicationThread();
+    if (surfaceView instanceof VideoDecoderOutputBufferRenderer) {
+      removeSurfaceCallbacks();
+      setVideoOutputInternal(surfaceView);
+      setNonVideoOutputSurfaceHolderInternal(surfaceView.getHolder());
+    } else if (surfaceView instanceof SphericalGLSurfaceView) {
+      removeSurfaceCallbacks();
+      sphericalGLSurfaceView = (SphericalGLSurfaceView) surfaceView;
+      player
+          .createMessage(frameMetadataListener)
+          .setType(FrameMetadataListener.MSG_SET_SPHERICAL_SURFACE_VIEW)
+          .setPayload(sphericalGLSurfaceView)
+          .send();
+      sphericalGLSurfaceView.addVideoSurfaceListener(componentListener);
+      setVideoOutputInternal(sphericalGLSurfaceView.getVideoSurface());
+      setNonVideoOutputSurfaceHolderInternal(surfaceView.getHolder());
+    } else {
+      setVideoSurfaceHolder(surfaceView == null ? null : surfaceView.getHolder());
+    }
   }
 
   @Override
   public void clearVideoSurfaceView(@Nullable SurfaceView surfaceView) {
+    verifyApplicationThread();
     clearVideoSurfaceHolder(surfaceView == null ? null : surfaceView.getHolder());
   }
 
   @Override
   public void setVideoTextureView(@Nullable TextureView textureView) {
     verifyApplicationThread();
-    removeSurfaceCallbacks();
-    if (textureView != null) {
-      clearVideoDecoderOutputBufferRenderer();
-    }
-    this.textureView = textureView;
     if (textureView == null) {
-      setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ true);
-      maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
+      clearVideoSurface();
     } else {
+      removeSurfaceCallbacks();
+      this.textureView = textureView;
       if (textureView.getSurfaceTextureListener() != null) {
         Log.w(TAG, "Replacing existing SurfaceTextureListener.");
       }
       textureView.setSurfaceTextureListener(componentListener);
+      @Nullable
       SurfaceTexture surfaceTexture =
           textureView.isAvailable() ? textureView.getSurfaceTexture() : null;
       if (surfaceTexture == null) {
-        setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ true);
+        setVideoOutputInternal(/* videoOutput= */ null);
         maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
       } else {
-        setVideoSurfaceInternal(new Surface(surfaceTexture), /* ownsSurface= */ true);
+        setSurfaceTextureInternal(surfaceTexture);
         maybeNotifySurfaceSizeChanged(textureView.getWidth(), textureView.getHeight());
       }
     }
@@ -832,34 +947,20 @@ public class SimpleExoPlayer extends BasePlayer
   public void clearVideoTextureView(@Nullable TextureView textureView) {
     verifyApplicationThread();
     if (textureView != null && textureView == this.textureView) {
-      setVideoTextureView(null);
-    }
-  }
-
-  @Override
-  public void setVideoDecoderOutputBufferRenderer(
-      @Nullable VideoDecoderOutputBufferRenderer videoDecoderOutputBufferRenderer) {
-    verifyApplicationThread();
-    if (videoDecoderOutputBufferRenderer != null) {
       clearVideoSurface();
     }
-    setVideoDecoderOutputBufferRendererInternal(videoDecoderOutputBufferRenderer);
   }
 
   @Override
-  public void clearVideoDecoderOutputBufferRenderer() {
-    verifyApplicationThread();
-    setVideoDecoderOutputBufferRendererInternal(/* videoDecoderOutputBufferRenderer= */ null);
+  public void addAudioOffloadListener(AudioOffloadListener listener) {
+    // Don't verify application thread. We allow calls to this method from any thread.
+    player.addAudioOffloadListener(listener);
   }
 
   @Override
-  public void clearVideoDecoderOutputBufferRenderer(
-      @Nullable VideoDecoderOutputBufferRenderer videoDecoderOutputBufferRenderer) {
-    verifyApplicationThread();
-    if (videoDecoderOutputBufferRenderer != null
-        && videoDecoderOutputBufferRenderer == this.videoDecoderOutputBufferRenderer) {
-      clearVideoDecoderOutputBufferRenderer();
-    }
+  public void removeAudioOffloadListener(AudioOffloadListener listener) {
+    // Don't verify application thread. We allow calls to this method from any thread.
+    player.removeAudioOffloadListener(listener);
   }
 
   @Override
@@ -876,11 +977,6 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
-  public void setAudioAttributes(AudioAttributes audioAttributes) {
-    setAudioAttributes(audioAttributes, /* handleAudioFocus= */ false);
-  }
-
-  @Override
   public void setAudioAttributes(AudioAttributes audioAttributes, boolean handleAudioFocus) {
     verifyApplicationThread();
     if (playerReleased) {
@@ -888,8 +984,9 @@ public class SimpleExoPlayer extends BasePlayer
     }
     if (!Util.areEqual(this.audioAttributes, audioAttributes)) {
       this.audioAttributes = audioAttributes;
-      sendRendererMessage(C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_AUDIO_ATTRIBUTES, audioAttributes);
+      sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_AUDIO_ATTRIBUTES, audioAttributes);
       streamVolumeManager.setStreamType(Util.getStreamTypeForAudioUsage(audioAttributes.usage));
+      analyticsCollector.onAudioAttributesChanged(audioAttributes);
       for (AudioListener audioListener : audioListeners) {
         audioListener.onAudioAttributesChanged(audioAttributes);
       }
@@ -914,10 +1011,23 @@ public class SimpleExoPlayer extends BasePlayer
     if (this.audioSessionId == audioSessionId) {
       return;
     }
+    if (audioSessionId == C.AUDIO_SESSION_ID_UNSET) {
+      if (Util.SDK_INT < 21) {
+        audioSessionId = initializeKeepSessionIdAudioTrack(C.AUDIO_SESSION_ID_UNSET);
+      } else {
+        audioSessionId = C.generateAudioSessionIdV21(applicationContext);
+      }
+    } else if (Util.SDK_INT < 21) {
+      // We need to re-initialize keepSessionIdAudioTrack to make sure the session is kept alive for
+      // as long as the player is using it.
+      initializeKeepSessionIdAudioTrack(audioSessionId);
+    }
     this.audioSessionId = audioSessionId;
-    sendRendererMessage(C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_AUDIO_SESSION_ID, audioSessionId);
-    if (audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-      notifyAudioSessionIdSet();
+    sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_AUDIO_SESSION_ID, audioSessionId);
+    sendRendererMessage(C.TRACK_TYPE_VIDEO, MSG_SET_AUDIO_SESSION_ID, audioSessionId);
+    analyticsCollector.onAudioSessionIdChanged(audioSessionId);
+    for (AudioListener audioListener : audioListeners) {
+      audioListener.onAudioSessionIdChanged(audioSessionId);
     }
   }
 
@@ -929,7 +1039,7 @@ public class SimpleExoPlayer extends BasePlayer
   @Override
   public void setAuxEffectInfo(AuxEffectInfo auxEffectInfo) {
     verifyApplicationThread();
-    sendRendererMessage(C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_AUX_EFFECT_INFO, auxEffectInfo);
+    sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_AUX_EFFECT_INFO, auxEffectInfo);
   }
 
   @Override
@@ -946,6 +1056,7 @@ public class SimpleExoPlayer extends BasePlayer
     }
     this.audioVolume = audioVolume;
     sendVolumeToRenderers();
+    analyticsCollector.onVolumeChanged(audioVolume);
     for (AudioListener audioListener : audioListeners) {
       audioListener.onVolumeChanged(audioVolume);
     }
@@ -968,40 +1079,8 @@ public class SimpleExoPlayer extends BasePlayer
       return;
     }
     this.skipSilenceEnabled = skipSilenceEnabled;
-    sendRendererMessage(
-        C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_SKIP_SILENCE_ENABLED, skipSilenceEnabled);
+    sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_SKIP_SILENCE_ENABLED, skipSilenceEnabled);
     notifySkipSilenceEnabledChanged();
-  }
-
-  /**
-   * Sets the stream type for audio playback, used by the underlying audio track.
-   *
-   * <p>Setting the stream type during playback may introduce a short gap in audio output as the
-   * audio track is recreated. A new audio session id will also be generated.
-   *
-   * <p>Calling this method overwrites any attributes set previously by calling {@link
-   * #setAudioAttributes(AudioAttributes)}.
-   *
-   * @deprecated Use {@link #setAudioAttributes(AudioAttributes)}.
-   * @param streamType The stream type for audio playback.
-   */
-  @Deprecated
-  public void setAudioStreamType(@C.StreamType int streamType) {
-    @C.AudioUsage int usage = Util.getAudioUsageForStreamType(streamType);
-    @C.AudioContentType int contentType = Util.getAudioContentTypeForStreamType(streamType);
-    AudioAttributes audioAttributes =
-        new AudioAttributes.Builder().setUsage(usage).setContentType(contentType).build();
-    setAudioAttributes(audioAttributes);
-  }
-
-  /**
-   * Returns the stream type for audio playback.
-   *
-   * @deprecated Use {@link #getAudioAttributes()}.
-   */
-  @Deprecated
-  public @C.StreamType int getAudioStreamType() {
-    return Util.getStreamTypeForAudioUsage(audioAttributes.usage);
   }
 
   /** Returns the {@link AnalyticsCollector} used for collecting analytics events. */
@@ -1035,8 +1114,6 @@ public class SimpleExoPlayer extends BasePlayer
    * device speakers. See the <a
    * href="https://developer.android.com/guide/topics/media-apps/volume-and-earphones#becoming-noisy">audio
    * becoming noisy</a> documentation for more information.
-   *
-   * <p>This feature is not enabled by default.
    *
    * @param handleAudioBecomingNoisy Whether the player should pause automatically when audio is
    *     rerouted from a headset to device speakers.
@@ -1074,25 +1151,6 @@ public class SimpleExoPlayer extends BasePlayer
     this.priorityTaskManager = priorityTaskManager;
   }
 
-  /**
-   * Sets the {@link PlaybackParams} governing audio playback.
-   *
-   * @param params The {@link PlaybackParams}, or null to clear any previously set parameters.
-   * @deprecated Use {@link #setPlaybackParameters(PlaybackParameters)}.
-   */
-  @Deprecated
-  @RequiresApi(23)
-  public void setPlaybackParams(@Nullable PlaybackParams params) {
-    PlaybackParameters playbackParameters;
-    if (params != null) {
-      params.allowDefaults();
-      playbackParameters = new PlaybackParameters(params.getSpeed(), params.getPitch());
-    } else {
-      playbackParameters = null;
-    }
-    setPlaybackParameters(playbackParameters);
-  }
-
   /** Returns the video format currently being played, or null if no video is being played. */
   @Nullable
   public Format getVideoFormat() {
@@ -1118,14 +1176,14 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
-  public void addVideoListener(com.google.android.exoplayer2.video.VideoListener listener) {
+  public void addVideoListener(VideoListener listener) {
     // Don't verify application thread. We allow calls to this method from any thread.
     Assertions.checkNotNull(listener);
     videoListeners.add(listener);
   }
 
   @Override
-  public void removeVideoListener(com.google.android.exoplayer2.video.VideoListener listener) {
+  public void removeVideoListener(VideoListener listener) {
     // Don't verify application thread. We allow calls to this method from any thread.
     videoListeners.remove(listener);
   }
@@ -1134,8 +1192,11 @@ public class SimpleExoPlayer extends BasePlayer
   public void setVideoFrameMetadataListener(VideoFrameMetadataListener listener) {
     verifyApplicationThread();
     videoFrameMetadataListener = listener;
-    sendRendererMessage(
-        C.TRACK_TYPE_VIDEO, Renderer.MSG_SET_VIDEO_FRAME_METADATA_LISTENER, listener);
+    player
+        .createMessage(frameMetadataListener)
+        .setType(FrameMetadataListener.MSG_SET_VIDEO_FRAME_METADATA_LISTENER)
+        .setPayload(listener)
+        .send();
   }
 
   @Override
@@ -1144,16 +1205,22 @@ public class SimpleExoPlayer extends BasePlayer
     if (videoFrameMetadataListener != listener) {
       return;
     }
-    sendRendererMessage(
-        C.TRACK_TYPE_VIDEO, Renderer.MSG_SET_VIDEO_FRAME_METADATA_LISTENER, /* payload= */ null);
+    player
+        .createMessage(frameMetadataListener)
+        .setType(FrameMetadataListener.MSG_SET_VIDEO_FRAME_METADATA_LISTENER)
+        .setPayload(null)
+        .send();
   }
 
   @Override
   public void setCameraMotionListener(CameraMotionListener listener) {
     verifyApplicationThread();
     cameraMotionListener = listener;
-    sendRendererMessage(
-        C.TRACK_TYPE_CAMERA_MOTION, Renderer.MSG_SET_CAMERA_MOTION_LISTENER, listener);
+    player
+        .createMessage(frameMetadataListener)
+        .setType(FrameMetadataListener.MSG_SET_CAMERA_MOTION_LISTENER)
+        .setPayload(listener)
+        .send();
   }
 
   @Override
@@ -1162,36 +1229,11 @@ public class SimpleExoPlayer extends BasePlayer
     if (cameraMotionListener != listener) {
       return;
     }
-    sendRendererMessage(
-        C.TRACK_TYPE_CAMERA_MOTION, Renderer.MSG_SET_CAMERA_MOTION_LISTENER, /* payload= */ null);
-  }
-
-  /**
-   * Sets a listener to receive video events, removing all existing listeners.
-   *
-   * @param listener The listener.
-   * @deprecated Use {@link #addVideoListener(com.google.android.exoplayer2.video.VideoListener)}.
-   */
-  @Deprecated
-  @SuppressWarnings("deprecation")
-  public void setVideoListener(@Nullable VideoListener listener) {
-    videoListeners.clear();
-    if (listener != null) {
-      addVideoListener(listener);
-    }
-  }
-
-  /**
-   * Equivalent to {@link #removeVideoListener(com.google.android.exoplayer2.video.VideoListener)}.
-   *
-   * @param listener The listener to clear.
-   * @deprecated Use {@link
-   *     #removeVideoListener(com.google.android.exoplayer2.video.VideoListener)}.
-   */
-  @Deprecated
-  @SuppressWarnings("deprecation")
-  public void clearVideoListener(VideoListener listener) {
-    removeVideoListener(listener);
+    player
+        .createMessage(frameMetadataListener)
+        .setType(FrameMetadataListener.MSG_SET_CAMERA_MOTION_LISTENER)
+        .setPayload(null)
+        .send();
   }
 
   @Override
@@ -1213,31 +1255,6 @@ public class SimpleExoPlayer extends BasePlayer
     return currentCues;
   }
 
-  /**
-   * Sets an output to receive text events, removing all existing outputs.
-   *
-   * @param output The output.
-   * @deprecated Use {@link #addTextOutput(TextOutput)}.
-   */
-  @Deprecated
-  public void setTextOutput(TextOutput output) {
-    textOutputs.clear();
-    if (output != null) {
-      addTextOutput(output);
-    }
-  }
-
-  /**
-   * Equivalent to {@link #removeTextOutput(TextOutput)}.
-   *
-   * @param output The output to clear.
-   * @deprecated Use {@link #removeTextOutput(TextOutput)}.
-   */
-  @Deprecated
-  public void clearTextOutput(TextOutput output) {
-    removeTextOutput(output);
-  }
-
   @Override
   public void addMetadataOutput(MetadataOutput listener) {
     // Don't verify application thread. We allow calls to this method from any thread.
@@ -1249,95 +1266,6 @@ public class SimpleExoPlayer extends BasePlayer
   public void removeMetadataOutput(MetadataOutput listener) {
     // Don't verify application thread. We allow calls to this method from any thread.
     metadataOutputs.remove(listener);
-  }
-
-  /**
-   * Sets an output to receive metadata events, removing all existing outputs.
-   *
-   * @param output The output.
-   * @deprecated Use {@link #addMetadataOutput(MetadataOutput)}.
-   */
-  @Deprecated
-  public void setMetadataOutput(MetadataOutput output) {
-    metadataOutputs.retainAll(Collections.singleton(analyticsCollector));
-    if (output != null) {
-      addMetadataOutput(output);
-    }
-  }
-
-  /**
-   * Equivalent to {@link #removeMetadataOutput(MetadataOutput)}.
-   *
-   * @param output The output to clear.
-   * @deprecated Use {@link #removeMetadataOutput(MetadataOutput)}.
-   */
-  @Deprecated
-  public void clearMetadataOutput(MetadataOutput output) {
-    removeMetadataOutput(output);
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} to get more detailed debug
-   *     information.
-   */
-  @Deprecated
-  @SuppressWarnings("deprecation")
-  public void setVideoDebugListener(@Nullable VideoRendererEventListener listener) {
-    videoDebugListeners.retainAll(Collections.singleton(analyticsCollector));
-    if (listener != null) {
-      addVideoDebugListener(listener);
-    }
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} to get more detailed debug
-   *     information.
-   */
-  @Deprecated
-  public void addVideoDebugListener(VideoRendererEventListener listener) {
-    Assertions.checkNotNull(listener);
-    videoDebugListeners.add(listener);
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} and {@link
-   *     #removeAnalyticsListener(AnalyticsListener)} to get more detailed debug information.
-   */
-  @Deprecated
-  public void removeVideoDebugListener(VideoRendererEventListener listener) {
-    videoDebugListeners.remove(listener);
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} to get more detailed debug
-   *     information.
-   */
-  @Deprecated
-  @SuppressWarnings("deprecation")
-  public void setAudioDebugListener(@Nullable AudioRendererEventListener listener) {
-    audioDebugListeners.retainAll(Collections.singleton(analyticsCollector));
-    if (listener != null) {
-      addAudioDebugListener(listener);
-    }
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} to get more detailed debug
-   *     information.
-   */
-  @Deprecated
-  public void addAudioDebugListener(AudioRendererEventListener listener) {
-    Assertions.checkNotNull(listener);
-    audioDebugListeners.add(listener);
-  }
-
-  /**
-   * @deprecated Use {@link #addAnalyticsListener(AnalyticsListener)} and {@link
-   *     #removeAnalyticsListener(AnalyticsListener)} to get more detailed debug information.
-   */
-  @Deprecated
-  public void removeAudioDebugListener(AudioRendererEventListener listener) {
-    audioDebugListeners.remove(listener);
   }
 
   // ExoPlayer implementation
@@ -1353,10 +1281,39 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
+  public Clock getClock() {
+    return player.getClock();
+  }
+
+  @Override
+  public void addListener(Listener listener) {
+    Assertions.checkNotNull(listener);
+    addAudioListener(listener);
+    addVideoListener(listener);
+    addTextOutput(listener);
+    addMetadataOutput(listener);
+    addDeviceListener(listener);
+    EventListener eventListener = listener;
+    addListener(eventListener);
+  }
+
+  @Override
   public void addListener(Player.EventListener listener) {
     // Don't verify application thread. We allow calls to this method from any thread.
     Assertions.checkNotNull(listener);
     player.addListener(listener);
+  }
+
+  @Override
+  public void removeListener(Listener listener) {
+    Assertions.checkNotNull(listener);
+    removeAudioListener(listener);
+    removeVideoListener(listener);
+    removeTextOutput(listener);
+    removeMetadataOutput(listener);
+    removeDeviceListener(listener);
+    EventListener eventListener = listener;
+    removeListener(eventListener);
   }
 
   @Override
@@ -1379,14 +1336,6 @@ public class SimpleExoPlayer extends BasePlayer
     return player.getPlaybackSuppressionReason();
   }
 
-  /** @deprecated Use {@link #getPlayerError()} instead. */
-  @Deprecated
-  @Override
-  @Nullable
-  public ExoPlaybackException getPlaybackError() {
-    return getPlayerError();
-  }
-
   @Override
   @Nullable
   public ExoPlaybackException getPlayerError() {
@@ -1400,6 +1349,12 @@ public class SimpleExoPlayer extends BasePlayer
   public void retry() {
     verifyApplicationThread();
     prepare();
+  }
+
+  @Override
+  public Commands getAvailableCommands() {
+    verifyApplicationThread();
+    return player.getAvailableCommands();
   }
 
   @Override
@@ -1431,24 +1386,13 @@ public class SimpleExoPlayer extends BasePlayer
   @Override
   public void prepare(MediaSource mediaSource, boolean resetPosition, boolean resetState) {
     verifyApplicationThread();
-    setMediaSources(
-        Collections.singletonList(mediaSource),
-        /* startWindowIndex= */ resetPosition ? 0 : C.INDEX_UNSET,
-        /* startPositionMs= */ C.TIME_UNSET);
+    setMediaSources(Collections.singletonList(mediaSource), resetPosition);
     prepare();
-  }
-
-  @Override
-  public void setMediaItems(List<MediaItem> mediaItems) {
-    verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
-    player.setMediaItems(mediaItems);
   }
 
   @Override
   public void setMediaItems(List<MediaItem> mediaItems, boolean resetPosition) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaItems(mediaItems, resetPosition);
   }
 
@@ -1456,42 +1400,18 @@ public class SimpleExoPlayer extends BasePlayer
   public void setMediaItems(
       List<MediaItem> mediaItems, int startWindowIndex, long startPositionMs) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaItems(mediaItems, startWindowIndex, startPositionMs);
-  }
-
-  @Override
-  public void setMediaItem(MediaItem mediaItem) {
-    verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
-    player.setMediaItem(mediaItem);
-  }
-
-  @Override
-  public void setMediaItem(MediaItem mediaItem, boolean resetPosition) {
-    verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
-    player.setMediaItem(mediaItem, resetPosition);
-  }
-
-  @Override
-  public void setMediaItem(MediaItem mediaItem, long startPositionMs) {
-    verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
-    player.setMediaItem(mediaItem, startPositionMs);
   }
 
   @Override
   public void setMediaSources(List<MediaSource> mediaSources) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSources(mediaSources);
   }
 
   @Override
   public void setMediaSources(List<MediaSource> mediaSources, boolean resetPosition) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSources(mediaSources, resetPosition);
   }
 
@@ -1499,53 +1419,31 @@ public class SimpleExoPlayer extends BasePlayer
   public void setMediaSources(
       List<MediaSource> mediaSources, int startWindowIndex, long startPositionMs) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSources(mediaSources, startWindowIndex, startPositionMs);
   }
 
   @Override
   public void setMediaSource(MediaSource mediaSource) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSource(mediaSource);
   }
 
   @Override
   public void setMediaSource(MediaSource mediaSource, boolean resetPosition) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSource(mediaSource, resetPosition);
   }
 
   @Override
   public void setMediaSource(MediaSource mediaSource, long startPositionMs) {
     verifyApplicationThread();
-    analyticsCollector.resetForNewPlaylist();
     player.setMediaSource(mediaSource, startPositionMs);
-  }
-
-  @Override
-  public void addMediaItems(List<MediaItem> mediaItems) {
-    verifyApplicationThread();
-    player.addMediaItems(mediaItems);
   }
 
   @Override
   public void addMediaItems(int index, List<MediaItem> mediaItems) {
     verifyApplicationThread();
     player.addMediaItems(index, mediaItems);
-  }
-
-  @Override
-  public void addMediaItem(MediaItem mediaItem) {
-    verifyApplicationThread();
-    player.addMediaItem(mediaItem);
-  }
-
-  @Override
-  public void addMediaItem(int index, MediaItem mediaItem) {
-    verifyApplicationThread();
-    player.addMediaItem(index, mediaItem);
   }
 
   @Override
@@ -1573,33 +1471,15 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
-  public void moveMediaItem(int currentIndex, int newIndex) {
-    verifyApplicationThread();
-    player.moveMediaItem(currentIndex, newIndex);
-  }
-
-  @Override
   public void moveMediaItems(int fromIndex, int toIndex, int newIndex) {
     verifyApplicationThread();
     player.moveMediaItems(fromIndex, toIndex, newIndex);
   }
 
   @Override
-  public void removeMediaItem(int index) {
-    verifyApplicationThread();
-    player.removeMediaItem(index);
-  }
-
-  @Override
   public void removeMediaItems(int fromIndex, int toIndex) {
     verifyApplicationThread();
     player.removeMediaItems(fromIndex, toIndex);
-  }
-
-  @Override
-  public void clearMediaItems() {
-    verifyApplicationThread();
-    player.clearMediaItems();
   }
 
   @Override
@@ -1673,7 +1553,7 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
-  public void setPlaybackParameters(@Nullable PlaybackParameters playbackParameters) {
+  public void setPlaybackParameters(PlaybackParameters playbackParameters) {
     verifyApplicationThread();
     player.setPlaybackParameters(playbackParameters);
   }
@@ -1713,18 +1593,21 @@ public class SimpleExoPlayer extends BasePlayer
   @Override
   public void release() {
     verifyApplicationThread();
+    if (Util.SDK_INT < 21 && keepSessionIdAudioTrack != null) {
+      keepSessionIdAudioTrack.release();
+      keepSessionIdAudioTrack = null;
+    }
     audioBecomingNoisyManager.setEnabled(false);
     streamVolumeManager.release();
     wakeLockManager.setStayAwake(false);
     wifiLockManager.setStayAwake(false);
     audioFocusManager.release();
     player.release();
+    analyticsCollector.release();
     removeSurfaceCallbacks();
-    if (surface != null) {
-      if (ownsSurface) {
-        surface.release();
-      }
-      surface = null;
+    if (ownedSurface != null) {
+      ownedSurface.release();
+      ownedSurface = null;
     }
     if (isPriorityTaskManagerRegistered) {
       Assertions.checkNotNull(priorityTaskManager).remove(C.PRIORITY_PLAYBACK);
@@ -1769,6 +1652,17 @@ public class SimpleExoPlayer extends BasePlayer
   public TrackSelectionArray getCurrentTrackSelections() {
     verifyApplicationThread();
     return player.getCurrentTrackSelections();
+  }
+
+  @Override
+  public List<Metadata> getCurrentStaticMetadata() {
+    verifyApplicationThread();
+    return player.getCurrentStaticMetadata();
+  }
+
+  @Override
+  public MediaMetadata getMediaMetadata() {
+    return player.getMediaMetadata();
   }
 
   @Override
@@ -1851,10 +1745,6 @@ public class SimpleExoPlayer extends BasePlayer
    * It should be used together with a foreground {@link android.app.Service} for use cases where
    * playback can occur when the screen is off (e.g. background audio playback). It is not useful if
    * the screen will always be on during playback (e.g. foreground video playback).
-   *
-   * <p>This feature is not enabled by default. If enabled, a WakeLock is held whenever the player
-   * is in the {@link #STATE_READY READY} or {@link #STATE_BUFFERING BUFFERING} states with {@code
-   * playWhenReady = true}.
    *
    * @param handleWakeLock Whether the player should use a {@link android.os.PowerManager.WakeLock}
    *     to ensure the device stays awake for playback, even when the screen is off.
@@ -1959,10 +1849,13 @@ public class SimpleExoPlayer extends BasePlayer
    * Sets whether the player should throw an {@link IllegalStateException} when methods are called
    * from a thread other than the one associated with {@link #getApplicationLooper()}.
    *
-   * <p>The default is {@code false}, but will change to {@code true} in the future.
+   * <p>The default is {@code true} and this method will be removed in the future.
    *
    * @param throwsWhenUsingWrongThread Whether to throw when methods are called from a wrong thread.
+   * @deprecated Disabling the enforcement can result in hard-to-detect bugs. Do not use this method
+   *     except to ease the transition while wrong thread access problems are fixed.
    */
+  @Deprecated
   public void setThrowsWhenUsingWrongThread(boolean throwsWhenUsingWrongThread) {
     this.throwsWhenUsingWrongThread = throwsWhenUsingWrongThread;
   }
@@ -1970,6 +1863,15 @@ public class SimpleExoPlayer extends BasePlayer
   // Internal methods.
 
   private void removeSurfaceCallbacks() {
+    if (sphericalGLSurfaceView != null) {
+      player
+          .createMessage(frameMetadataListener)
+          .setType(FrameMetadataListener.MSG_SET_SPHERICAL_SURFACE_VIEW)
+          .setPayload(null)
+          .send();
+      sphericalGLSurfaceView.removeVideoSurfaceListener(componentListener);
+      sphericalGLSurfaceView = null;
+    }
     if (textureView != null) {
       if (textureView.getSurfaceTextureListener() != componentListener) {
         Log.w(TAG, "SurfaceTextureListener already unset or replaced.");
@@ -1984,54 +1886,81 @@ public class SimpleExoPlayer extends BasePlayer
     }
   }
 
-  private void setVideoSurfaceInternal(@Nullable Surface surface, boolean ownsSurface) {
-    // Note: We don't turn this method into a no-op if the surface is being replaced with itself
-    // so as to ensure onRenderedFirstFrame callbacks are still called in this case.
+  private void setSurfaceTextureInternal(SurfaceTexture surfaceTexture) {
+    Surface surface = new Surface(surfaceTexture);
+    setVideoOutputInternal(surface);
+    ownedSurface = surface;
+  }
+
+  private void setVideoOutputInternal(@Nullable Object videoOutput) {
+    // Note: We don't turn this method into a no-op if the output is being replaced with itself so
+    // as to ensure onRenderedFirstFrame callbacks are still called in this case.
     List<PlayerMessage> messages = new ArrayList<>();
     for (Renderer renderer : renderers) {
       if (renderer.getTrackType() == C.TRACK_TYPE_VIDEO) {
         messages.add(
             player
                 .createMessage(renderer)
-                .setType(Renderer.MSG_SET_SURFACE)
-                .setPayload(surface)
+                .setType(MSG_SET_VIDEO_OUTPUT)
+                .setPayload(videoOutput)
                 .send());
       }
     }
-    if (this.surface != null && this.surface != surface) {
-      // We're replacing a surface. Block to ensure that it's not accessed after the method returns.
+    if (this.videoOutput != null && this.videoOutput != videoOutput) {
+      // We're replacing an output. Block to ensure that this output will not be accessed by the
+      // renderers after this method returns.
       try {
         for (PlayerMessage message : messages) {
-          message.blockUntilDelivered(200);
+          message.blockUntilDelivered(detachSurfaceTimeoutMs);
         }
-      } catch (TimeoutException e) {
-        Log.e(TAG, "WTF?! Just ignore the timeout");
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
+      } catch (TimeoutException e) {
+        // One of the renderers timed out releasing its resources.
+        player.stop(
+            /* reset= */ false,
+            ExoPlaybackException.createForRenderer(
+                new ExoTimeoutException(ExoTimeoutException.TIMEOUT_OPERATION_DETACH_SURFACE)));
       }
-      // If we created the previous surface, we are responsible for releasing it.
-      if (this.ownsSurface) {
-        this.surface.release();
+      if (this.videoOutput == ownedSurface) {
+        // We're replacing a surface that we are responsible for releasing.
+        ownedSurface.release();
+        ownedSurface = null;
       }
     }
-    this.surface = surface;
-    this.ownsSurface = ownsSurface;
+    this.videoOutput = videoOutput;
   }
 
-  private void setVideoDecoderOutputBufferRendererInternal(
-      @Nullable VideoDecoderOutputBufferRenderer videoDecoderOutputBufferRenderer) {
-    sendRendererMessage(
-        C.TRACK_TYPE_VIDEO,
-        Renderer.MSG_SET_VIDEO_DECODER_OUTPUT_BUFFER_RENDERER,
-        videoDecoderOutputBufferRenderer);
-    this.videoDecoderOutputBufferRenderer = videoDecoderOutputBufferRenderer;
+  /**
+   * Sets the holder of the surface that will be displayed to the user, but which should
+   * <em>not</em> be the output for video renderers. This case occurs when video frames need to be
+   * rendered to an intermediate surface (which is not the one held by the provided holder).
+   *
+   * @param nonVideoOutputSurfaceHolder The holder of the surface that will eventually be displayed
+   *     to the user.
+   */
+  private void setNonVideoOutputSurfaceHolderInternal(SurfaceHolder nonVideoOutputSurfaceHolder) {
+    // Although we won't use the view's surface directly as the video output, still use the holder
+    // to query the surface size, to be informed in changes to the size via componentListener, and
+    // for equality checking in clearVideoSurfaceHolder.
+    surfaceHolderSurfaceIsVideoOutput = false;
+    surfaceHolder = nonVideoOutputSurfaceHolder;
+    surfaceHolder.addCallback(componentListener);
+    Surface surface = surfaceHolder.getSurface();
+    if (surface != null && surface.isValid()) {
+      Rect surfaceSize = surfaceHolder.getSurfaceFrame();
+      maybeNotifySurfaceSizeChanged(surfaceSize.width(), surfaceSize.height());
+    } else {
+      maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
+    }
   }
 
   private void maybeNotifySurfaceSizeChanged(int width, int height) {
     if (width != surfaceWidth || height != surfaceHeight) {
       surfaceWidth = width;
       surfaceHeight = height;
-      for (com.google.android.exoplayer2.video.VideoListener videoListener : videoListeners) {
+      analyticsCollector.onSurfaceSizeChanged(width, height);
+      for (VideoListener videoListener : videoListeners) {
         videoListener.onSurfaceSizeChanged(width, height);
       }
     }
@@ -2039,32 +1968,13 @@ public class SimpleExoPlayer extends BasePlayer
 
   private void sendVolumeToRenderers() {
     float scaledVolume = audioVolume * audioFocusManager.getVolumeMultiplier();
-    sendRendererMessage(C.TRACK_TYPE_AUDIO, Renderer.MSG_SET_VOLUME, scaledVolume);
-  }
-
-  private void notifyAudioSessionIdSet() {
-    for (AudioListener audioListener : audioListeners) {
-      // Prevent duplicate notification if a listener is both a AudioRendererEventListener and
-      // a AudioListener, as they have the same method signature.
-      if (!audioDebugListeners.contains(audioListener)) {
-        audioListener.onAudioSessionId(audioSessionId);
-      }
-    }
-    for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-      audioDebugListener.onAudioSessionId(audioSessionId);
-    }
+    sendRendererMessage(C.TRACK_TYPE_AUDIO, MSG_SET_VOLUME, scaledVolume);
   }
 
   @SuppressWarnings("SuspiciousMethodCalls")
   private void notifySkipSilenceEnabledChanged() {
+    analyticsCollector.onSkipSilenceEnabledChanged(skipSilenceEnabled);
     for (AudioListener listener : audioListeners) {
-      // Prevent duplicate notification if a listener is both a AudioRendererEventListener and
-      // a AudioListener, as they have the same method signature.
-      if (!audioDebugListeners.contains(listener)) {
-        listener.onSkipSilenceEnabledChanged(skipSilenceEnabled);
-      }
-    }
-    for (AudioRendererEventListener listener : audioDebugListeners) {
       listener.onSkipSilenceEnabledChanged(skipSilenceEnabled);
     }
   }
@@ -2087,7 +1997,9 @@ public class SimpleExoPlayer extends BasePlayer
     switch (playbackState) {
       case Player.STATE_READY:
       case Player.STATE_BUFFERING:
-        wakeLockManager.setStayAwake(getPlayWhenReady());
+        boolean isSleeping = experimentalIsSleepingForOffload();
+        wakeLockManager.setStayAwake(getPlayWhenReady() && !isSleeping);
+        // The wifi lock is not released while sleeping to avoid interrupting downloads.
         wifiLockManager.setStayAwake(getPlayWhenReady());
         break;
       case Player.STATE_ENDED:
@@ -2101,14 +2013,21 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   private void verifyApplicationThread() {
-    if (Looper.myLooper() != getApplicationLooper()) {
+    // The constructor may be executed on a background thread. Wait with accessing the player from
+    // the app thread until the constructor finished executing.
+    constructorFinished.blockUninterruptible();
+    if (Thread.currentThread() != getApplicationLooper().getThread()) {
+      String message =
+          Util.formatInvariant(
+              "Player is accessed on the wrong thread.\n"
+                  + "Current thread: '%s'\n"
+                  + "Expected thread: '%s'\n"
+                  + "See https://exoplayer.dev/issues/player-accessed-on-wrong-thread",
+              Thread.currentThread().getName(), getApplicationLooper().getThread().getName());
       if (throwsWhenUsingWrongThread) {
-        throw new IllegalStateException(WRONG_THREAD_ERROR_MESSAGE);
+        throw new IllegalStateException(message);
       }
-      Log.w(
-          TAG,
-          WRONG_THREAD_ERROR_MESSAGE,
-          hasNotifiedFullWrongThreadWarning ? null : new IllegalStateException());
+      Log.w(TAG, message, hasNotifiedFullWrongThreadWarning ? null : new IllegalStateException());
       hasNotifiedFullWrongThreadWarning = true;
     }
   }
@@ -2119,6 +2038,40 @@ public class SimpleExoPlayer extends BasePlayer
         player.createMessage(renderer).setType(messageType).setPayload(payload).send();
       }
     }
+  }
+
+  /**
+   * Initializes {@link #keepSessionIdAudioTrack} to keep an audio session ID alive. If the audio
+   * session ID is {@link C#AUDIO_SESSION_ID_UNSET} then a new audio session ID is generated.
+   *
+   * <p>Use of this method is only required on API level 21 and earlier.
+   *
+   * @param audioSessionId The audio session ID, or {@link C#AUDIO_SESSION_ID_UNSET} to generate a
+   *     new one.
+   * @return The audio session ID.
+   */
+  private int initializeKeepSessionIdAudioTrack(int audioSessionId) {
+    if (keepSessionIdAudioTrack != null
+        && keepSessionIdAudioTrack.getAudioSessionId() != audioSessionId) {
+      keepSessionIdAudioTrack.release();
+      keepSessionIdAudioTrack = null;
+    }
+    if (keepSessionIdAudioTrack == null) {
+      int sampleRate = 4000; // Minimum sample rate supported by the platform.
+      int channelConfig = AudioFormat.CHANNEL_OUT_MONO;
+      @C.PcmEncoding int encoding = C.ENCODING_PCM_16BIT;
+      int bufferSize = 2; // Use a two byte buffer, as it is not actually used for playback.
+      keepSessionIdAudioTrack =
+          new AudioTrack(
+              C.STREAM_TYPE_DEFAULT,
+              sampleRate,
+              channelConfig,
+              encoding,
+              bufferSize,
+              AudioTrack.MODE_STATIC,
+              audioSessionId);
+    }
+    return keepSessionIdAudioTrack.getAudioSessionId();
   }
 
   private static DeviceInfo createDeviceInfo(StreamVolumeManager streamVolumeManager) {
@@ -2136,93 +2089,89 @@ public class SimpleExoPlayer extends BasePlayer
 
   private final class ComponentListener
       implements VideoRendererEventListener,
-          AudioRendererEventListener,
-          TextOutput,
-          MetadataOutput,
-          SurfaceHolder.Callback,
-          TextureView.SurfaceTextureListener,
-          AudioFocusManager.PlayerControl,
-          AudioBecomingNoisyManager.EventListener,
-          StreamVolumeManager.Listener,
-          Player.EventListener {
+      AudioRendererEventListener,
+      TextOutput,
+      MetadataOutput,
+      SurfaceHolder.Callback,
+      TextureView.SurfaceTextureListener,
+      SphericalGLSurfaceView.VideoSurfaceListener,
+      AudioFocusManager.PlayerControl,
+      AudioBecomingNoisyManager.EventListener,
+      StreamVolumeManager.Listener,
+      Player.EventListener,
+      AudioOffloadListener {
 
     // VideoRendererEventListener implementation
 
     @Override
     public void onVideoEnabled(DecoderCounters counters) {
       videoDecoderCounters = counters;
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoEnabled(counters);
-      }
+      analyticsCollector.onVideoEnabled(counters);
     }
 
     @Override
     public void onVideoDecoderInitialized(
         String decoderName, long initializedTimestampMs, long initializationDurationMs) {
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoDecoderInitialized(
-            decoderName, initializedTimestampMs, initializationDurationMs);
-      }
+      analyticsCollector.onVideoDecoderInitialized(
+          decoderName, initializedTimestampMs, initializationDurationMs);
     }
 
     @Override
-    public void onVideoInputFormatChanged(Format format) {
+    public void onVideoInputFormatChanged(
+        Format format, @Nullable DecoderReuseEvaluation decoderReuseEvaluation) {
       videoFormat = format;
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoInputFormatChanged(format);
-      }
+      analyticsCollector.onVideoInputFormatChanged(format, decoderReuseEvaluation);
     }
 
     @Override
     public void onDroppedFrames(int count, long elapsed) {
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onDroppedFrames(count, elapsed);
+      analyticsCollector.onDroppedFrames(count, elapsed);
+    }
+
+    @Override
+    public void onVideoSizeChanged(VideoSize videoSize) {
+      SimpleExoPlayer.this.videoSize = videoSize;
+      analyticsCollector.onVideoSizeChanged(videoSize);
+      for (VideoListener videoListener : videoListeners) {
+        videoListener.onVideoSizeChanged(videoSize);
+        videoListener.onVideoSizeChanged(
+            videoSize.width,
+            videoSize.height,
+            videoSize.unappliedRotationDegrees,
+            videoSize.pixelWidthHeightRatio);
       }
     }
 
     @Override
-    public void onVideoSizeChanged(
-        int width, int height, int unappliedRotationDegrees, float pixelWidthHeightRatio) {
-      for (com.google.android.exoplayer2.video.VideoListener videoListener : videoListeners) {
-        // Prevent duplicate notification if a listener is both a VideoRendererEventListener and
-        // a VideoListener, as they have the same method signature.
-        if (!videoDebugListeners.contains(videoListener)) {
-          videoListener.onVideoSizeChanged(
-              width, height, unappliedRotationDegrees, pixelWidthHeightRatio);
-        }
-      }
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoSizeChanged(
-            width, height, unappliedRotationDegrees, pixelWidthHeightRatio);
-      }
-    }
-
-    @Override
-    public void onRenderedFirstFrame(Surface surface) {
-      if (SimpleExoPlayer.this.surface == surface) {
-        for (com.google.android.exoplayer2.video.VideoListener videoListener : videoListeners) {
+    public void onRenderedFirstFrame(Object output, long renderTimeMs) {
+      analyticsCollector.onRenderedFirstFrame(output, renderTimeMs);
+      if (videoOutput == output) {
+        for (VideoListener videoListener : videoListeners) {
           videoListener.onRenderedFirstFrame();
         }
       }
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onRenderedFirstFrame(surface);
-      }
+    }
+
+    @Override
+    public void onVideoDecoderReleased(String decoderName) {
+      analyticsCollector.onVideoDecoderReleased(decoderName);
     }
 
     @Override
     public void onVideoDisabled(DecoderCounters counters) {
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoDisabled(counters);
-      }
+      analyticsCollector.onVideoDisabled(counters);
       videoFormat = null;
       videoDecoderCounters = null;
     }
 
     @Override
     public void onVideoFrameProcessingOffset(long totalProcessingOffsetUs, int frameCount) {
-      for (VideoRendererEventListener videoDebugListener : videoDebugListeners) {
-        videoDebugListener.onVideoFrameProcessingOffset(totalProcessingOffsetUs, frameCount);
-      }
+      analyticsCollector.onVideoFrameProcessingOffset(totalProcessingOffsetUs, frameCount);
+    }
+
+    @Override
+    public void onVideoCodecError(Exception videoCodecError) {
+      analyticsCollector.onVideoCodecError(videoCodecError);
     }
 
     // AudioRendererEventListener implementation
@@ -2230,59 +2179,43 @@ public class SimpleExoPlayer extends BasePlayer
     @Override
     public void onAudioEnabled(DecoderCounters counters) {
       audioDecoderCounters = counters;
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioEnabled(counters);
-      }
-    }
-
-    @Override
-    public void onAudioSessionId(int sessionId) {
-      if (audioSessionId == sessionId) {
-        return;
-      }
-      audioSessionId = sessionId;
-      notifyAudioSessionIdSet();
+      analyticsCollector.onAudioEnabled(counters);
     }
 
     @Override
     public void onAudioDecoderInitialized(
         String decoderName, long initializedTimestampMs, long initializationDurationMs) {
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioDecoderInitialized(
-            decoderName, initializedTimestampMs, initializationDurationMs);
-      }
+      analyticsCollector.onAudioDecoderInitialized(
+          decoderName, initializedTimestampMs, initializationDurationMs);
     }
 
     @Override
-    public void onAudioInputFormatChanged(Format format) {
+    public void onAudioInputFormatChanged(
+        Format format, @Nullable DecoderReuseEvaluation decoderReuseEvaluation) {
       audioFormat = format;
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioInputFormatChanged(format);
-      }
+      analyticsCollector.onAudioInputFormatChanged(format, decoderReuseEvaluation);
     }
 
     @Override
     public void onAudioPositionAdvancing(long playoutStartSystemTimeMs) {
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioPositionAdvancing(playoutStartSystemTimeMs);
-      }
+      analyticsCollector.onAudioPositionAdvancing(playoutStartSystemTimeMs);
     }
 
     @Override
     public void onAudioUnderrun(int bufferSize, long bufferSizeMs, long elapsedSinceLastFeedMs) {
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioUnderrun(bufferSize, bufferSizeMs, elapsedSinceLastFeedMs);
-      }
+      analyticsCollector.onAudioUnderrun(bufferSize, bufferSizeMs, elapsedSinceLastFeedMs);
+    }
+
+    @Override
+    public void onAudioDecoderReleased(String decoderName) {
+      analyticsCollector.onAudioDecoderReleased(decoderName);
     }
 
     @Override
     public void onAudioDisabled(DecoderCounters counters) {
-      for (AudioRendererEventListener audioDebugListener : audioDebugListeners) {
-        audioDebugListener.onAudioDisabled(counters);
-      }
+      analyticsCollector.onAudioDisabled(counters);
       audioFormat = null;
       audioDecoderCounters = null;
-      audioSessionId = C.AUDIO_SESSION_ID_UNSET;
     }
 
     @Override
@@ -2292,6 +2225,16 @@ public class SimpleExoPlayer extends BasePlayer
       }
       SimpleExoPlayer.this.skipSilenceEnabled = skipSilenceEnabled;
       notifySkipSilenceEnabledChanged();
+    }
+
+    @Override
+    public void onAudioSinkError(Exception audioSinkError) {
+      analyticsCollector.onAudioSinkError(audioSinkError);
+    }
+
+    @Override
+    public void onAudioCodecError(Exception audioCodecError) {
+      analyticsCollector.onAudioCodecError(audioCodecError);
     }
 
     // TextOutput implementation
@@ -2308,6 +2251,8 @@ public class SimpleExoPlayer extends BasePlayer
 
     @Override
     public void onMetadata(Metadata metadata) {
+      analyticsCollector.onMetadata(metadata);
+      player.onMetadata(metadata);
       for (MetadataOutput metadataOutput : metadataOutputs) {
         metadataOutput.onMetadata(metadata);
       }
@@ -2317,7 +2262,9 @@ public class SimpleExoPlayer extends BasePlayer
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-      setVideoSurfaceInternal(holder.getSurface(), false);
+      if (surfaceHolderSurfaceIsVideoOutput) {
+        setVideoOutputInternal(holder.getSurface());
+      }
     }
 
     @Override
@@ -2327,7 +2274,9 @@ public class SimpleExoPlayer extends BasePlayer
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-      setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ false);
+      if (surfaceHolderSurfaceIsVideoOutput) {
+        setVideoOutputInternal(/* videoOutput= */ null);
+      }
       maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
     }
 
@@ -2335,7 +2284,7 @@ public class SimpleExoPlayer extends BasePlayer
 
     @Override
     public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
-      setVideoSurfaceInternal(new Surface(surfaceTexture), /* ownsSurface= */ true);
+      setSurfaceTextureInternal(surfaceTexture);
       maybeNotifySurfaceSizeChanged(width, height);
     }
 
@@ -2346,7 +2295,7 @@ public class SimpleExoPlayer extends BasePlayer
 
     @Override
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
-      setVideoSurfaceInternal(/* surface= */ null, /* ownsSurface= */ true);
+      setVideoOutputInternal(/* videoOutput= */ null);
       maybeNotifySurfaceSizeChanged(/* width= */ 0, /* height= */ 0);
       return true;
     }
@@ -2354,6 +2303,18 @@ public class SimpleExoPlayer extends BasePlayer
     @Override
     public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
       // Do nothing.
+    }
+
+    // SphericalGLSurfaceView.VideoSurfaceListener
+
+    @Override
+    public void onVideoSurfaceCreated(Surface surface) {
+      setVideoOutputInternal(surface);
+    }
+
+    @Override
+    public void onVideoSurfaceDestroyed(Surface surface) {
+      setVideoOutputInternal(/* videoOutput= */ null);
     }
 
     // AudioFocusManager.PlayerControl implementation
@@ -2425,7 +2386,92 @@ public class SimpleExoPlayer extends BasePlayer
         boolean playWhenReady, @PlayWhenReadyChangeReason int reason) {
       updateWakeAndWifiLock();
     }
+
+    // Player.AudioOffloadListener implementation.
+
+    @Override
+    public void onExperimentalSleepingForOffloadChanged(boolean sleepingForOffload) {
+      updateWakeAndWifiLock();
+    }
   }
 
+  /** Listeners that are called on the playback thread. */
+  private static final class FrameMetadataListener
+      implements VideoFrameMetadataListener, CameraMotionListener, PlayerMessage.Target {
 
+    public static final int MSG_SET_VIDEO_FRAME_METADATA_LISTENER =
+        Renderer.MSG_SET_VIDEO_FRAME_METADATA_LISTENER;
+    public static final int MSG_SET_CAMERA_MOTION_LISTENER =
+        Renderer.MSG_SET_CAMERA_MOTION_LISTENER;
+    public static final int MSG_SET_SPHERICAL_SURFACE_VIEW = Renderer.MSG_CUSTOM_BASE;
+
+    @Nullable private VideoFrameMetadataListener videoFrameMetadataListener;
+    @Nullable private CameraMotionListener cameraMotionListener;
+    @Nullable private VideoFrameMetadataListener internalVideoFrameMetadataListener;
+    @Nullable private CameraMotionListener internalCameraMotionListener;
+
+    @Override
+    public void handleMessage(int messageType, @Nullable Object payload) {
+      switch (messageType) {
+        case MSG_SET_VIDEO_FRAME_METADATA_LISTENER:
+          videoFrameMetadataListener = (VideoFrameMetadataListener) payload;
+          break;
+        case MSG_SET_CAMERA_MOTION_LISTENER:
+          cameraMotionListener = (CameraMotionListener) payload;
+          break;
+        case MSG_SET_SPHERICAL_SURFACE_VIEW:
+          SphericalGLSurfaceView surfaceView = (SphericalGLSurfaceView) payload;
+          if (surfaceView == null) {
+            internalVideoFrameMetadataListener = null;
+            internalCameraMotionListener = null;
+          } else {
+            internalVideoFrameMetadataListener = surfaceView.getVideoFrameMetadataListener();
+            internalCameraMotionListener = surfaceView.getCameraMotionListener();
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    // VideoFrameMetadataListener
+
+    @Override
+    public void onVideoFrameAboutToBeRendered(
+        long presentationTimeUs,
+        long releaseTimeNs,
+        Format format,
+        @Nullable MediaFormat mediaFormat) {
+      if (internalVideoFrameMetadataListener != null) {
+        internalVideoFrameMetadataListener.onVideoFrameAboutToBeRendered(
+            presentationTimeUs, releaseTimeNs, format, mediaFormat);
+      }
+      if (videoFrameMetadataListener != null) {
+        videoFrameMetadataListener.onVideoFrameAboutToBeRendered(
+            presentationTimeUs, releaseTimeNs, format, mediaFormat);
+      }
+    }
+
+    // CameraMotionListener
+
+    @Override
+    public void onCameraMotion(long timeUs, float[] rotation) {
+      if (internalCameraMotionListener != null) {
+        internalCameraMotionListener.onCameraMotion(timeUs, rotation);
+      }
+      if (cameraMotionListener != null) {
+        cameraMotionListener.onCameraMotion(timeUs, rotation);
+      }
+    }
+
+    @Override
+    public void onCameraMotionReset() {
+      if (internalCameraMotionListener != null) {
+        internalCameraMotionListener.onCameraMotionReset();
+      }
+      if (cameraMotionListener != null) {
+        cameraMotionListener.onCameraMotionReset();
+      }
+    }
+  }
 }

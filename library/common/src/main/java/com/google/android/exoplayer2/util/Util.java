@@ -37,8 +37,6 @@ import android.database.DatabaseUtils;
 import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Point;
 import android.media.AudioFormat;
-import android.net.ConnectivityManager;
-import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -49,6 +47,7 @@ import android.security.NetworkSecurityPolicy;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Base64;
+import android.util.SparseLongArray;
 import android.view.Display;
 import android.view.SurfaceView;
 import android.view.WindowManager;
@@ -82,6 +81,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.MissingResourceException;
+import java.util.NoSuchElementException;
 import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -89,22 +89,24 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.DataFormatException;
+import java.util.zip.GZIPOutputStream;
 import java.util.zip.Inflater;
 import org.checkerframework.checker.initialization.qual.UnknownInitialization;
 import org.checkerframework.checker.nullness.compatqual.NullableType;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.PolyNull;
 
-/**
- * Miscellaneous utility methods.
- */
+/** Miscellaneous utility methods. */
 public final class Util {
 
   /**
    * Like {@link android.os.Build.VERSION#SDK_INT}, but in a place where it can be conveniently
    * overridden for local testing.
    */
-  public static final int SDK_INT = "R".equals(Build.VERSION.CODENAME) ? 30 : Build.VERSION.SDK_INT;
+  public static final int SDK_INT =
+      "S".equals(Build.VERSION.CODENAME)
+          ? 31
+          : "R".equals(Build.VERSION.CODENAME) ? 30 : Build.VERSION.SDK_INT;
 
   /**
    * Like {@link Build#DEVICE}, but in a place where it can be conveniently overridden for local
@@ -505,6 +507,10 @@ public final class Util {
    *     run. {@code false} otherwise.
    */
   public static boolean postOrRun(Handler handler, Runnable runnable) {
+    Looper looper = handler.getLooper();
+    if (!looper.getThread().isAlive()) {
+      return false;
+    }
     if (handler.getLooper() == Looper.myLooper()) {
       runnable.run();
       return true;
@@ -528,7 +534,7 @@ public final class Util {
    * @param threadName The name of the thread.
    * @return The executor.
    */
-  public static ExecutorService newSingleThreadExecutor(final String threadName) {
+  public static ExecutorService newSingleThreadExecutor(String threadName) {
     return Executors.newSingleThreadExecutor(runnable -> new Thread(runnable, threadName));
   }
 
@@ -662,11 +668,11 @@ public final class Util {
     // Locale data (especially for API < 21) may produce tags with '_' instead of the
     // standard-conformant '-'.
     String normalizedTag = language.replace('_', '-');
-    if (normalizedTag.isEmpty() || "und".equals(normalizedTag)) {
+    if (normalizedTag.isEmpty() || normalizedTag.equals(C.LANGUAGE_UNDETERMINED)) {
       // Tag isn't valid, keep using the original.
       normalizedTag = language;
     }
-    normalizedTag = Util.toLowerInvariant(normalizedTag);
+    normalizedTag = Ascii.toLowerCase(normalizedTag);
     String mainLanguage = Util.splitAtFirst(normalizedTag, "-")[0];
     if (languageTagReplacementMap == null) {
       languageTagReplacementMap = createIsoLanguageReplacementMap();
@@ -750,26 +756,6 @@ public final class Util {
    */
   public static boolean isLinebreak(int c) {
     return c == '\n' || c == '\r';
-  }
-
-  /**
-   * Converts text to lower case using {@link Locale#US}.
-   *
-   * @param text The text to convert.
-   * @return The lower case text, or null if {@code text} is null.
-   */
-  public static @PolyNull String toLowerInvariant(@PolyNull String text) {
-    return text == null ? text : text.toLowerCase(Locale.US);
-  }
-
-  /**
-   * Converts text to upper case using {@link Locale#US}.
-   *
-   * @param text The text to convert.
-   * @return The upper case text, or null if {@code text} is null.
-   */
-  public static @PolyNull String toUpperInvariant(@PolyNull String text) {
-    return text == null ? text : text.toUpperCase(Locale.US);
   }
 
   /**
@@ -1167,6 +1153,25 @@ public final class Util {
   }
 
   /**
+   * Returns the minimum value in the given {@link SparseLongArray}.
+   *
+   * @param sparseLongArray The {@link SparseLongArray}.
+   * @return The minimum value.
+   * @throws NoSuchElementException If the array is empty.
+   */
+  @RequiresApi(18)
+  public static long minValue(SparseLongArray sparseLongArray) {
+    if (sparseLongArray.size() == 0) {
+      throw new NoSuchElementException();
+    }
+    long min = Long.MAX_VALUE;
+    for (int i = 0; i < sparseLongArray.size(); i++) {
+      min = min(min, sparseLongArray.valueAt(i));
+    }
+    return min;
+  }
+
+  /**
    * Parses an xs:duration attribute value, returning the parsed duration in milliseconds.
    *
    * @param value The attribute value to decode.
@@ -1335,7 +1340,7 @@ public final class Util {
    * Returns the duration of media that will elapse in {@code playoutDuration}.
    *
    * @param playoutDuration The duration to scale.
-   * @param speed The playback speed.
+   * @param speed The factor by which playback is sped up.
    * @return The scaled duration, in the same units as {@code playoutDuration}.
    */
   public static long getMediaDurationForPlayoutDuration(long playoutDuration, float speed) {
@@ -1483,6 +1488,18 @@ public final class Util {
     }
     return applicationName + "/" + versionName + " (Linux;Android " + Build.VERSION.RELEASE
         + ") " + ExoPlayerLibraryInfo.VERSION_SLASHY;
+  }
+
+  /** Returns the number of codec strings in {@code codecs} whose type matches {@code trackType}. */
+  public static int getCodecCountOfType(@Nullable String codecs, int trackType) {
+    String[] codecArray = splitCodecs(codecs);
+    int count = 0;
+    for (String codec : codecArray) {
+      if (trackType == MimeTypes.getTrackTypeOfCodec(codec)) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /**
@@ -1677,7 +1694,6 @@ public final class Util {
         return C.USAGE_ASSISTANCE_SONIFICATION;
       case C.STREAM_TYPE_VOICE_CALL:
         return C.USAGE_VOICE_COMMUNICATION;
-      case C.STREAM_TYPE_USE_DEFAULT:
       case C.STREAM_TYPE_MUSIC:
       default:
         return C.USAGE_MEDIA;
@@ -1698,7 +1714,6 @@ public final class Util {
         return C.CONTENT_TYPE_SONIFICATION;
       case C.STREAM_TYPE_VOICE_CALL:
         return C.CONTENT_TYPE_SPEECH;
-      case C.STREAM_TYPE_USE_DEFAULT:
       case C.STREAM_TYPE_MUSIC:
       default:
         return C.CONTENT_TYPE_MUSIC;
@@ -1747,7 +1762,7 @@ public final class Util {
    * @return The derived {@link UUID}, or {@code null} if one could not be derived.
    */
   public static @Nullable UUID getDrmUuid(String drmScheme) {
-    switch (toLowerInvariant(drmScheme)) {
+    switch (Ascii.toLowerCase(drmScheme)) {
       case "widevine":
         return C.WIDEVINE_UUID;
       case "playready":
@@ -1785,6 +1800,11 @@ public final class Util {
    */
   @ContentType
   public static int inferContentType(Uri uri) {
+    @Nullable String scheme = uri.getScheme();
+    if (scheme != null && Ascii.equalsIgnoreCase("rtsp", scheme)) {
+      return C.TYPE_RTSP;
+    }
+
     @Nullable String path = uri.getPath();
     return path == null ? C.TYPE_OTHER : inferContentType(path);
   }
@@ -1797,7 +1817,7 @@ public final class Util {
    */
   @ContentType
   public static int inferContentType(String fileName) {
-    fileName = toLowerInvariant(fileName);
+    fileName = Ascii.toLowerCase(fileName);
     if (fileName.endsWith(".mpd")) {
       return C.TYPE_DASH;
     } else if (fileName.endsWith(".m3u8")) {
@@ -1837,6 +1857,8 @@ public final class Util {
         return C.TYPE_HLS;
       case MimeTypes.APPLICATION_SS:
         return C.TYPE_SS;
+      case MimeTypes.APPLICATION_RTSP:
+        return C.TYPE_RTSP;
       default:
         return C.TYPE_OTHER;
     }
@@ -1870,11 +1892,11 @@ public final class Util {
    * @return The fixed URI.
    */
   public static Uri fixSmoothStreamingIsmManifestUri(Uri uri) {
-    @Nullable String path = toLowerInvariant(uri.getPath());
+    @Nullable String path = uri.getPath();
     if (path == null) {
       return uri;
     }
-    Matcher ismMatcher = ISM_URL_PATTERN.matcher(path);
+    Matcher ismMatcher = ISM_URL_PATTERN.matcher(Ascii.toLowerCase(path));
     if (ismMatcher.matches() && ismMatcher.group(1) == null) {
       // Add missing "Manifest" suffix.
       return Uri.withAppendedPath(uri, "Manifest");
@@ -2007,8 +2029,6 @@ public final class Util {
 
   /** Returns a data URI with the specified MIME type and data. */
   public static Uri getDataUriForString(String mimeType, String data) {
-    // TODO(internal: b/169937045): For now we don't pass the URL_SAFE flag as DataSchemeDataSource
-    // doesn't decode using it.
     return Uri.parse(
         "data:" + mimeType + ";base64," + Base64.encodeToString(data.getBytes(), Base64.NO_WRAP));
   }
@@ -2047,7 +2067,7 @@ public final class Util {
 
   /** Creates a new empty file in the directory returned by {@link Context#getCacheDir()}. */
   public static File createTempFile(Context context, String prefix) throws IOException {
-    return File.createTempFile(prefix, null, context.getCacheDir());
+    return File.createTempFile(prefix, null, checkNotNull(context.getCacheDir()));
   }
 
   /**
@@ -2085,6 +2105,17 @@ public final class Util {
     return initialValue;
   }
 
+  /** Compresses {@code input} using gzip and returns the result in a newly allocated byte array. */
+  public static byte[] gzip(byte[] input) {
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (GZIPOutputStream os = new GZIPOutputStream(output)) {
+      os.write(input);
+    } catch (IOException e) {
+      throw new AssertionError(e);
+    }
+    return output.toByteArray();
+  }
+
   /**
    * Absolute <i>get</i> method for reading an int value in {@link ByteOrder#BIG_ENDIAN} in a {@link
    * ByteBuffer}. Same as {@link ByteBuffer#getInt(int)} except the buffer's order as returned by
@@ -2098,52 +2129,6 @@ public final class Util {
   public static int getBigEndianInt(ByteBuffer buffer, int index) {
     int value = buffer.getInt(index);
     return buffer.order() == ByteOrder.BIG_ENDIAN ? value : Integer.reverseBytes(value);
-  }
-
-  /**
-   * Returns the {@link C.NetworkType} of the current network connection.
-   *
-   * @param context A context to access the connectivity manager.
-   * @return The {@link C.NetworkType} of the current network connection.
-   */
-  // Intentional null check to guard against user input.
-  @SuppressWarnings("known.nonnull")
-  @C.NetworkType
-  public static int getNetworkType(Context context) {
-    if (context == null) {
-      // Note: This is for backward compatibility only (context used to be @Nullable).
-      return C.NETWORK_TYPE_UNKNOWN;
-    }
-    NetworkInfo networkInfo;
-    @Nullable
-    ConnectivityManager connectivityManager =
-        (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-    if (connectivityManager == null) {
-      return C.NETWORK_TYPE_UNKNOWN;
-    }
-    try {
-      networkInfo = connectivityManager.getActiveNetworkInfo();
-    } catch (SecurityException e) {
-      // Expected if permission was revoked.
-      return C.NETWORK_TYPE_UNKNOWN;
-    }
-    if (networkInfo == null || !networkInfo.isConnected()) {
-      return C.NETWORK_TYPE_OFFLINE;
-    }
-    switch (networkInfo.getType()) {
-      case ConnectivityManager.TYPE_WIFI:
-        return C.NETWORK_TYPE_WIFI;
-      case ConnectivityManager.TYPE_WIMAX:
-        return C.NETWORK_TYPE_4G;
-      case ConnectivityManager.TYPE_MOBILE:
-      case ConnectivityManager.TYPE_MOBILE_DUN:
-      case ConnectivityManager.TYPE_MOBILE_HIPRI:
-        return getMobileNetworkType(networkInfo);
-      case ConnectivityManager.TYPE_ETHERNET:
-        return C.NETWORK_TYPE_ETHERNET;
-      default: // VPN, Bluetooth, Dummy.
-        return C.NETWORK_TYPE_OTHER;
-    }
   }
 
   /**
@@ -2161,11 +2146,11 @@ public final class Util {
       if (telephonyManager != null) {
         String countryCode = telephonyManager.getNetworkCountryIso();
         if (!TextUtils.isEmpty(countryCode)) {
-          return toUpperInvariant(countryCode);
+          return Ascii.toUpperCase(countryCode);
         }
       }
     }
-    return toUpperInvariant(Locale.getDefault().getCountry());
+    return Ascii.toUpperCase(Locale.getDefault().getCountry());
   }
 
   /**
@@ -2197,9 +2182,8 @@ public final class Util {
     if (input.bytesLeft() <= 0) {
       return false;
     }
-    byte[] outputData = output.getData();
-    if (outputData.length < input.bytesLeft()) {
-      outputData = new byte[2 * input.bytesLeft()];
+    if (output.capacity() < input.bytesLeft()) {
+      output.ensureCapacity(2 * input.bytesLeft());
     }
     if (inflater == null) {
       inflater = new Inflater();
@@ -2208,16 +2192,17 @@ public final class Util {
     try {
       int outputSize = 0;
       while (true) {
-        outputSize += inflater.inflate(outputData, outputSize, outputData.length - outputSize);
+        outputSize +=
+            inflater.inflate(output.getData(), outputSize, output.capacity() - outputSize);
         if (inflater.finished()) {
-          output.reset(outputData, outputSize);
+          output.setLimit(outputSize);
           return true;
         }
         if (inflater.needsDictionary() || inflater.needsInput()) {
           return false;
         }
-        if (outputSize == outputData.length) {
-          outputData = Arrays.copyOf(outputData, outputData.length * 2);
+        if (outputSize == output.capacity()) {
+          output.ensureCapacity(output.capacity() * 2);
         }
       }
     } catch (DataFormatException e) {
@@ -2434,38 +2419,6 @@ public final class Util {
     return locale.toLanguageTag();
   }
 
-  private static @C.NetworkType int getMobileNetworkType(NetworkInfo networkInfo) {
-    switch (networkInfo.getSubtype()) {
-      case TelephonyManager.NETWORK_TYPE_EDGE:
-      case TelephonyManager.NETWORK_TYPE_GPRS:
-        return C.NETWORK_TYPE_2G;
-      case TelephonyManager.NETWORK_TYPE_1xRTT:
-      case TelephonyManager.NETWORK_TYPE_CDMA:
-      case TelephonyManager.NETWORK_TYPE_EVDO_0:
-      case TelephonyManager.NETWORK_TYPE_EVDO_A:
-      case TelephonyManager.NETWORK_TYPE_EVDO_B:
-      case TelephonyManager.NETWORK_TYPE_HSDPA:
-      case TelephonyManager.NETWORK_TYPE_HSPA:
-      case TelephonyManager.NETWORK_TYPE_HSUPA:
-      case TelephonyManager.NETWORK_TYPE_IDEN:
-      case TelephonyManager.NETWORK_TYPE_UMTS:
-      case TelephonyManager.NETWORK_TYPE_EHRPD:
-      case TelephonyManager.NETWORK_TYPE_HSPAP:
-      case TelephonyManager.NETWORK_TYPE_TD_SCDMA:
-        return C.NETWORK_TYPE_3G;
-      case TelephonyManager.NETWORK_TYPE_LTE:
-        return C.NETWORK_TYPE_4G;
-      case TelephonyManager.NETWORK_TYPE_NR:
-        return SDK_INT >= 29 ? C.NETWORK_TYPE_5G : C.NETWORK_TYPE_UNKNOWN;
-      case TelephonyManager.NETWORK_TYPE_IWLAN:
-        return C.NETWORK_TYPE_WIFI;
-      case TelephonyManager.NETWORK_TYPE_GSM:
-      case TelephonyManager.NETWORK_TYPE_UNKNOWN:
-      default: // Future mobile network types.
-        return C.NETWORK_TYPE_CELLULAR_UNKNOWN;
-    }
-  }
-
   private static HashMap<String, String> createIsoLanguageReplacementMap() {
     String[] iso2Languages = Locale.getISOLanguages();
     HashMap<String, String> replacedLanguages =
@@ -2572,7 +2525,7 @@ public final class Util {
         "hsn", "zh-hsn"
       };
 
-  // Legacy ("grandfathered") tags, replaced by modern equivalents (including macrolanguage)
+  // Legacy tags that have been replaced by modern equivalents (including macrolanguage)
   // See https://www.iana.org/assignments/language-subtag-registry/language-subtag-registry.
   private static final String[] isoLegacyTagReplacements =
       new String[] {

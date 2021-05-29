@@ -26,11 +26,6 @@ import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.SeekParameters;
 import com.google.android.exoplayer2.extractor.ChunkIndex;
-import com.google.android.exoplayer2.extractor.Extractor;
-import com.google.android.exoplayer2.extractor.TrackOutput;
-import com.google.android.exoplayer2.extractor.mkv.MatroskaExtractor;
-import com.google.android.exoplayer2.extractor.mp4.FragmentedMp4Extractor;
-import com.google.android.exoplayer2.extractor.rawcc.RawCcExtractor;
 import com.google.android.exoplayer2.source.BehindLiveWindowException;
 import com.google.android.exoplayer2.source.chunk.BaseMediaChunkIterator;
 import com.google.android.exoplayer2.source.chunk.BundledChunkExtractor;
@@ -47,33 +42,55 @@ import com.google.android.exoplayer2.source.dash.manifest.AdaptationSet;
 import com.google.android.exoplayer2.source.dash.manifest.DashManifest;
 import com.google.android.exoplayer2.source.dash.manifest.RangedUri;
 import com.google.android.exoplayer2.source.dash.manifest.Representation;
-import com.google.android.exoplayer2.trackselection.TrackSelection;
+import com.google.android.exoplayer2.trackselection.ExoTrackSelection;
 import com.google.android.exoplayer2.upstream.DataSource;
 import com.google.android.exoplayer2.upstream.DataSpec;
 import com.google.android.exoplayer2.upstream.HttpDataSource.InvalidResponseCodeException;
 import com.google.android.exoplayer2.upstream.LoaderErrorThrower;
 import com.google.android.exoplayer2.upstream.TransferListener;
-import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * A default {@link DashChunkSource} implementation.
- */
+/** A default {@link DashChunkSource} implementation. */
 public class DefaultDashChunkSource implements DashChunkSource {
 
   public static final class Factory implements DashChunkSource.Factory {
 
     private final DataSource.Factory dataSourceFactory;
     private final int maxSegmentsPerLoad;
+    private final ChunkExtractor.Factory chunkExtractorFactory;
 
+    /**
+     * Equivalent to {@link #Factory(ChunkExtractor.Factory, DataSource.Factory, int) new
+     * Factory(BundledChunkExtractor.FACTORY, dataSourceFactory, maxSegmentsPerLoad = 1)}.
+     */
     public Factory(DataSource.Factory dataSourceFactory) {
       this(dataSourceFactory, /* maxSegmentsPerLoad= */ 1);
     }
 
+    /**
+     * Equivalent to {@link #Factory(ChunkExtractor.Factory, DataSource.Factory, int) new
+     * Factory(BundledChunkExtractor.FACTORY, dataSourceFactory, maxSegmentsPerLoad)}.
+     */
     public Factory(DataSource.Factory dataSourceFactory, int maxSegmentsPerLoad) {
+      this(BundledChunkExtractor.FACTORY, dataSourceFactory, maxSegmentsPerLoad);
+    }
+
+    /**
+     * Creates a new instance.
+     *
+     * @param chunkExtractorFactory Creates {@link ChunkExtractor} instances to use for extracting
+     *     chunks.
+     * @param dataSourceFactory Creates the {@link DataSource} to use for downloading chunks.
+     * @param maxSegmentsPerLoad See {@link DefaultDashChunkSource#DefaultDashChunkSource}.
+     */
+    public Factory(
+        ChunkExtractor.Factory chunkExtractorFactory,
+        DataSource.Factory dataSourceFactory,
+        int maxSegmentsPerLoad) {
+      this.chunkExtractorFactory = chunkExtractorFactory;
       this.dataSourceFactory = dataSourceFactory;
       this.maxSegmentsPerLoad = maxSegmentsPerLoad;
     }
@@ -84,7 +101,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
         DashManifest manifest,
         int periodIndex,
         int[] adaptationSetIndices,
-        TrackSelection trackSelection,
+        ExoTrackSelection trackSelection,
         int trackType,
         long elapsedRealtimeOffsetMs,
         boolean enableEventMessageTrack,
@@ -96,6 +113,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
         dataSource.addTransferListener(transferListener);
       }
       return new DefaultDashChunkSource(
+          chunkExtractorFactory,
           manifestLoaderErrorThrower,
           manifest,
           periodIndex,
@@ -122,14 +140,15 @@ public class DefaultDashChunkSource implements DashChunkSource {
 
   protected final RepresentationHolder[] representationHolders;
 
-  private TrackSelection trackSelection;
+  private ExoTrackSelection trackSelection;
   private DashManifest manifest;
   private int periodIndex;
-  private IOException fatalError;
+  @Nullable private IOException fatalError;
   private boolean missingLastSegment;
-  private long liveEdgeTimeUs;
 
   /**
+   * @param chunkExtractorFactory Creates {@link ChunkExtractor} instances to use for extracting
+   *     chunks.
    * @param manifestLoaderErrorThrower Throws errors affecting loading of manifests.
    * @param manifest The initial manifest.
    * @param periodIndex The index of the period in the manifest.
@@ -149,11 +168,12 @@ public class DefaultDashChunkSource implements DashChunkSource {
    *     messages targeting the player. Maybe null if this is not necessary.
    */
   public DefaultDashChunkSource(
+      ChunkExtractor.Factory chunkExtractorFactory,
       LoaderErrorThrower manifestLoaderErrorThrower,
       DashManifest manifest,
       int periodIndex,
       int[] adaptationSetIndices,
-      TrackSelection trackSelection,
+      ExoTrackSelection trackSelection,
       int trackType,
       DataSource dataSource,
       long elapsedRealtimeOffsetMs,
@@ -173,7 +193,6 @@ public class DefaultDashChunkSource implements DashChunkSource {
     this.playerTrackEmsgHandler = playerTrackEmsgHandler;
 
     long periodDurationUs = manifest.getPeriodDurationUs(periodIndex);
-    liveEdgeTimeUs = C.TIME_UNSET;
 
     List<Representation> representations = getRepresentations();
     representationHolders = new RepresentationHolder[trackSelection.length()];
@@ -182,11 +201,15 @@ public class DefaultDashChunkSource implements DashChunkSource {
       representationHolders[i] =
           new RepresentationHolder(
               periodDurationUs,
-              trackType,
               representation,
-              enableEventMessageTrack,
-              closedCaptionFormats,
-              playerTrackEmsgHandler);
+              BundledChunkExtractor.FACTORY.createProgressiveMediaExtractor(
+                  trackType,
+                  representation.format,
+                  enableEventMessageTrack,
+                  closedCaptionFormats,
+                  playerTrackEmsgHandler),
+              /* segmentNumShift= */ 0,
+              representation.getIndex());
     }
   }
 
@@ -197,8 +220,12 @@ public class DefaultDashChunkSource implements DashChunkSource {
       if (representationHolder.segmentIndex != null) {
         long segmentNum = representationHolder.getSegmentNum(positionUs);
         long firstSyncUs = representationHolder.getSegmentStartTimeUs(segmentNum);
+        long segmentCount = representationHolder.getSegmentCount();
         long secondSyncUs =
-            firstSyncUs < positionUs && segmentNum < representationHolder.getSegmentCount() - 1
+            firstSyncUs < positionUs
+                    && (segmentCount == DashSegmentIndex.INDEX_UNBOUNDED
+                        || segmentNum
+                            < representationHolder.getFirstSegmentNum() + segmentCount - 1)
                 ? representationHolder.getSegmentStartTimeUs(segmentNum + 1)
                 : firstSyncUs;
         return seekParameters.resolveSeekPositionUs(positionUs, firstSyncUs, secondSyncUs);
@@ -226,7 +253,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
   }
 
   @Override
-  public void updateTrackSelection(TrackSelection trackSelection) {
+  public void updateTrackSelection(ExoTrackSelection trackSelection) {
     this.trackSelection = trackSelection;
   }
 
@@ -267,7 +294,6 @@ public class DefaultDashChunkSource implements DashChunkSource {
     }
 
     long bufferedDurationUs = loadPositionUs - playbackPositionUs;
-    long timeToLiveEdgeUs = resolveTimeToLiveEdgeUs(playbackPositionUs);
     long presentationPositionUs =
         C.msToUs(manifest.availabilityStartTimeMs)
             + C.msToUs(manifest.getPeriod(periodIndex).startMs)
@@ -280,6 +306,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
     }
 
     long nowUnixTimeUs = C.msToUs(Util.getNowUnixTimeMs(elapsedRealtimeOffsetMs));
+    long nowPeriodTimeUs = getNowPeriodTimeUs(nowUnixTimeUs);
     MediaChunk previous = queue.isEmpty() ? null : queue.get(queue.size() - 1);
     MediaChunkIterator[] chunkIterators = new MediaChunkIterator[trackSelection.length()];
     for (int i = 0; i < chunkIterators.length; i++) {
@@ -288,9 +315,9 @@ public class DefaultDashChunkSource implements DashChunkSource {
         chunkIterators[i] = MediaChunkIterator.EMPTY;
       } else {
         long firstAvailableSegmentNum =
-            representationHolder.getFirstAvailableSegmentNum(manifest, periodIndex, nowUnixTimeUs);
+            representationHolder.getFirstAvailableSegmentNum(nowUnixTimeUs);
         long lastAvailableSegmentNum =
-            representationHolder.getLastAvailableSegmentNum(manifest, periodIndex, nowUnixTimeUs);
+            representationHolder.getLastAvailableSegmentNum(nowUnixTimeUs);
         long segmentNum =
             getSegmentNum(
                 representationHolder,
@@ -303,13 +330,14 @@ public class DefaultDashChunkSource implements DashChunkSource {
         } else {
           chunkIterators[i] =
               new RepresentationSegmentIterator(
-                  representationHolder, segmentNum, lastAvailableSegmentNum);
+                  representationHolder, segmentNum, lastAvailableSegmentNum, nowPeriodTimeUs);
         }
       }
     }
 
+    long availableLiveDurationUs = getAvailableLiveDurationUs(nowUnixTimeUs, playbackPositionUs);
     trackSelection.updateSelectedTrack(
-        playbackPositionUs, bufferedDurationUs, timeToLiveEdgeUs, queue, chunkIterators);
+        playbackPositionUs, bufferedDurationUs, availableLiveDurationUs, queue, chunkIterators);
 
     RepresentationHolder representationHolder =
         representationHolders[trackSelection.getSelectedIndex()];
@@ -342,13 +370,8 @@ public class DefaultDashChunkSource implements DashChunkSource {
       return;
     }
 
-    long firstAvailableSegmentNum =
-        representationHolder.getFirstAvailableSegmentNum(manifest, periodIndex, nowUnixTimeUs);
-    long lastAvailableSegmentNum =
-        representationHolder.getLastAvailableSegmentNum(manifest, periodIndex, nowUnixTimeUs);
-
-    updateLiveEdgeTimeUs(representationHolder, lastAvailableSegmentNum);
-
+    long firstAvailableSegmentNum = representationHolder.getFirstAvailableSegmentNum(nowUnixTimeUs);
+    long lastAvailableSegmentNum = representationHolder.getLastAvailableSegmentNum(nowUnixTimeUs);
     long segmentNum =
         getSegmentNum(
             representationHolder,
@@ -397,7 +420,8 @@ public class DefaultDashChunkSource implements DashChunkSource {
             trackSelection.getSelectionData(),
             segmentNum,
             maxSegmentCount,
-            seekTimeUs);
+            seekTimeUs,
+            nowPeriodTimeUs);
   }
 
   @Override
@@ -430,8 +454,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
     if (!cancelable) {
       return false;
     }
-    if (playerTrackEmsgHandler != null
-        && playerTrackEmsgHandler.maybeRefreshManifestOnLoadingError(chunk)) {
+    if (playerTrackEmsgHandler != null && playerTrackEmsgHandler.onChunkLoadError(chunk)) {
       return true;
     }
     // Workaround for missing segment at the end of the period
@@ -440,7 +463,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
         && ((InvalidResponseCodeException) e).responseCode == 404) {
       RepresentationHolder representationHolder =
           representationHolders[trackSelection.indexOf(chunk.trackFormat)];
-      int segmentCount = representationHolder.getSegmentCount();
+      long segmentCount = representationHolder.getSegmentCount();
       if (segmentCount != DashSegmentIndex.INDEX_UNBOUNDED && segmentCount != 0) {
         long lastAvailableSegmentNum = representationHolder.getFirstSegmentNum() + segmentCount - 1;
         if (((MediaChunk) chunk).getNextChunkIndex() > lastAvailableSegmentNum) {
@@ -488,15 +511,22 @@ public class DefaultDashChunkSource implements DashChunkSource {
     return representations;
   }
 
-  private void updateLiveEdgeTimeUs(
-      RepresentationHolder representationHolder, long lastAvailableSegmentNum) {
-    liveEdgeTimeUs = manifest.dynamic
-        ? representationHolder.getSegmentEndTimeUs(lastAvailableSegmentNum) : C.TIME_UNSET;
+  private long getAvailableLiveDurationUs(long nowUnixTimeUs, long playbackPositionUs) {
+    if (!manifest.dynamic) {
+      return C.TIME_UNSET;
+    }
+    long lastSegmentNum = representationHolders[0].getLastAvailableSegmentNum(nowUnixTimeUs);
+    long lastSegmentEndTimeUs = representationHolders[0].getSegmentEndTimeUs(lastSegmentNum);
+    long nowPeriodTimeUs = getNowPeriodTimeUs(nowUnixTimeUs);
+    long availabilityEndTimeUs = min(nowPeriodTimeUs, lastSegmentEndTimeUs);
+    return max(0, availabilityEndTimeUs - playbackPositionUs);
   }
 
-  private long resolveTimeToLiveEdgeUs(long playbackPositionUs) {
-    boolean resolveTimeToLiveEdgePossible = manifest.dynamic && liveEdgeTimeUs != C.TIME_UNSET;
-    return resolveTimeToLiveEdgePossible ? liveEdgeTimeUs - playbackPositionUs : C.TIME_UNSET;
+  private long getNowPeriodTimeUs(long nowUnixTimeUs) {
+    return manifest.availabilityStartTimeMs == C.TIME_UNSET
+        ? C.TIME_UNSET
+        : nowUnixTimeUs
+            - C.msToUs(manifest.availabilityStartTimeMs + manifest.getPeriod(periodIndex).startMs);
   }
 
   protected Chunk newInitializationChunk(
@@ -519,7 +549,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
     } else {
       requestUri = indexUri;
     }
-    DataSpec dataSpec = DashUtil.buildDataSpec(representation, requestUri);
+    DataSpec dataSpec = DashUtil.buildDataSpec(representation, requestUri, /* flags= */ 0);
     return new InitializationChunk(
         dataSource,
         dataSpec,
@@ -538,14 +568,20 @@ public class DefaultDashChunkSource implements DashChunkSource {
       Object trackSelectionData,
       long firstSegmentNum,
       int maxSegmentCount,
-      long seekTimeUs) {
+      long seekTimeUs,
+      long nowPeriodTimeUs) {
     Representation representation = representationHolder.representation;
     long startTimeUs = representationHolder.getSegmentStartTimeUs(firstSegmentNum);
     RangedUri segmentUri = representationHolder.getSegmentUrl(firstSegmentNum);
     String baseUrl = representation.baseUrl;
     if (representationHolder.chunkExtractor == null) {
       long endTimeUs = representationHolder.getSegmentEndTimeUs(firstSegmentNum);
-      DataSpec dataSpec = DashUtil.buildDataSpec(representation, segmentUri);
+      int flags =
+          representationHolder.isSegmentAvailableAtFullNetworkSpeed(
+                  firstSegmentNum, nowPeriodTimeUs)
+              ? 0
+              : DataSpec.FLAG_MIGHT_NOT_USE_FULL_NETWORK_SPEED;
+      DataSpec dataSpec = DashUtil.buildDataSpec(representation, segmentUri, flags);
       return new SingleSampleMediaChunk(dataSource, dataSpec, trackFormat, trackSelectionReason,
           trackSelectionData, startTimeUs, endTimeUs, firstSegmentNum, trackType, trackFormat);
     } else {
@@ -560,13 +596,18 @@ public class DefaultDashChunkSource implements DashChunkSource {
         segmentUri = mergedSegmentUri;
         segmentCount++;
       }
-      long endTimeUs = representationHolder.getSegmentEndTimeUs(firstSegmentNum + segmentCount - 1);
+      long segmentNum = firstSegmentNum + segmentCount - 1;
+      long endTimeUs = representationHolder.getSegmentEndTimeUs(segmentNum);
       long periodDurationUs = representationHolder.periodDurationUs;
       long clippedEndTimeUs =
           periodDurationUs != C.TIME_UNSET && periodDurationUs <= endTimeUs
               ? periodDurationUs
               : C.TIME_UNSET;
-      DataSpec dataSpec = DashUtil.buildDataSpec(representation, segmentUri);
+      int flags =
+          representationHolder.isSegmentAvailableAtFullNetworkSpeed(segmentNum, nowPeriodTimeUs)
+              ? 0
+              : DataSpec.FLAG_MIGHT_NOT_USE_FULL_NETWORK_SPEED;
+      DataSpec dataSpec = DashUtil.buildDataSpec(representation, segmentUri, flags);
       long sampleOffsetUs = -representation.presentationTimeOffsetUs;
       return new ContainerMediaChunk(
           dataSource,
@@ -591,6 +632,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
   protected static final class RepresentationSegmentIterator extends BaseMediaChunkIterator {
 
     private final RepresentationHolder representationHolder;
+    private final long nowPeriodTimeUs;
 
     /**
      * Creates iterator.
@@ -598,20 +640,29 @@ public class DefaultDashChunkSource implements DashChunkSource {
      * @param representation The {@link RepresentationHolder} to wrap.
      * @param firstAvailableSegmentNum The number of the first available segment.
      * @param lastAvailableSegmentNum The number of the last available segment.
+     * @param nowPeriodTimeUs The current time in microseconds since the start of the period used
+     *     for calculating if segments are available at full network speed.
      */
     public RepresentationSegmentIterator(
         RepresentationHolder representation,
         long firstAvailableSegmentNum,
-        long lastAvailableSegmentNum) {
+        long lastAvailableSegmentNum,
+        long nowPeriodTimeUs) {
       super(/* fromIndex= */ firstAvailableSegmentNum, /* toIndex= */ lastAvailableSegmentNum);
       this.representationHolder = representation;
+      this.nowPeriodTimeUs = nowPeriodTimeUs;
     }
 
     @Override
     public DataSpec getDataSpec() {
       checkInBounds();
-      RangedUri segmentUri = representationHolder.getSegmentUrl(getCurrentIndex());
-      return DashUtil.buildDataSpec(representationHolder.representation, segmentUri);
+      long currentIndex = getCurrentIndex();
+      RangedUri segmentUri = representationHolder.getSegmentUrl(currentIndex);
+      int flags =
+          representationHolder.isSegmentAvailableAtFullNetworkSpeed(currentIndex, nowPeriodTimeUs)
+              ? 0
+              : DataSpec.FLAG_MIGHT_NOT_USE_FULL_NETWORK_SPEED;
+      return DashUtil.buildDataSpec(representationHolder.representation, segmentUri, flags);
     }
 
     @Override
@@ -639,26 +690,6 @@ public class DefaultDashChunkSource implements DashChunkSource {
     private final long segmentNumShift;
 
     /* package */ RepresentationHolder(
-        long periodDurationUs,
-        int trackType,
-        Representation representation,
-        boolean enableEventMessageTrack,
-        List<Format> closedCaptionFormats,
-        @Nullable TrackOutput playerEmsgTrackOutput) {
-      this(
-          periodDurationUs,
-          representation,
-          createChunkExtractor(
-              trackType,
-              representation,
-              enableEventMessageTrack,
-              closedCaptionFormats,
-              playerEmsgTrackOutput),
-          /* segmentNumShift= */ 0,
-          representation.getIndex());
-    }
-
-    private RepresentationHolder(
         long periodDurationUs,
         Representation representation,
         @Nullable ChunkExtractor chunkExtractor,
@@ -690,7 +721,7 @@ public class DefaultDashChunkSource implements DashChunkSource {
             newPeriodDurationUs, newRepresentation, chunkExtractor, segmentNumShift, newIndex);
       }
 
-      int oldIndexSegmentCount = oldIndex.getSegmentCount(newPeriodDurationUs);
+      long oldIndexSegmentCount = oldIndex.getSegmentCount(newPeriodDurationUs);
       if (oldIndexSegmentCount == 0) {
         // Segment numbers cannot shift if the old index was empty.
         return new RepresentationHolder(
@@ -739,7 +770,12 @@ public class DefaultDashChunkSource implements DashChunkSource {
       return segmentIndex.getFirstSegmentNum() + segmentNumShift;
     }
 
-    public int getSegmentCount() {
+    public long getFirstAvailableSegmentNum(long nowUnixTimeUs) {
+      return segmentIndex.getFirstAvailableSegmentNum(periodDurationUs, nowUnixTimeUs)
+          + segmentNumShift;
+    }
+
+    public long getSegmentCount() {
       return segmentIndex.getSegmentCount(periodDurationUs);
     }
 
@@ -760,71 +796,20 @@ public class DefaultDashChunkSource implements DashChunkSource {
       return segmentIndex.getSegmentUrl(segmentNum - segmentNumShift);
     }
 
-    public long getFirstAvailableSegmentNum(
-        DashManifest manifest, int periodIndex, long nowUnixTimeUs) {
-      if (getSegmentCount() == DashSegmentIndex.INDEX_UNBOUNDED
-          && manifest.timeShiftBufferDepthMs != C.TIME_UNSET) {
-        // The index is itself unbounded. We need to use the current time to calculate the range of
-        // available segments.
-        long liveEdgeTimeUs = nowUnixTimeUs - C.msToUs(manifest.availabilityStartTimeMs);
-        long periodStartUs = C.msToUs(manifest.getPeriod(periodIndex).startMs);
-        long liveEdgeTimeInPeriodUs = liveEdgeTimeUs - periodStartUs;
-        long bufferDepthUs = C.msToUs(manifest.timeShiftBufferDepthMs);
-        return max(getFirstSegmentNum(), getSegmentNum(liveEdgeTimeInPeriodUs - bufferDepthUs));
-      }
-      return getFirstSegmentNum();
+    public long getLastAvailableSegmentNum(long nowUnixTimeUs) {
+      return getFirstAvailableSegmentNum(nowUnixTimeUs)
+          + segmentIndex.getAvailableSegmentCount(periodDurationUs, nowUnixTimeUs)
+          - 1;
     }
 
-    public long getLastAvailableSegmentNum(
-        DashManifest manifest, int periodIndex, long nowUnixTimeUs) {
-      int availableSegmentCount = getSegmentCount();
-      if (availableSegmentCount == DashSegmentIndex.INDEX_UNBOUNDED) {
-        // The index is itself unbounded. We need to use the current time to calculate the range of
-        // available segments.
-        long liveEdgeTimeUs = nowUnixTimeUs - C.msToUs(manifest.availabilityStartTimeMs);
-        long periodStartUs = C.msToUs(manifest.getPeriod(periodIndex).startMs);
-        long liveEdgeTimeInPeriodUs = liveEdgeTimeUs - periodStartUs;
-        // getSegmentNum(liveEdgeTimeInPeriodUs) will not be completed yet, so subtract one to get
-        // the index of the last completed segment.
-        return getSegmentNum(liveEdgeTimeInPeriodUs) - 1;
+    public boolean isSegmentAvailableAtFullNetworkSpeed(long segmentNum, long nowPeriodTimeUs) {
+      if (segmentIndex.isExplicit()) {
+        // We don't support segment availability for explicit indices (internal ref: b/172894901).
+        // Hence, also assume all segments in explicit indices are always available at full network
+        // speed even if they end in the future.
+        return true;
       }
-      return getFirstSegmentNum() + availableSegmentCount - 1;
-    }
-
-    @Nullable
-    private static ChunkExtractor createChunkExtractor(
-        int trackType,
-        Representation representation,
-        boolean enableEventMessageTrack,
-        List<Format> closedCaptionFormats,
-        @Nullable TrackOutput playerEmsgTrackOutput) {
-      String containerMimeType = representation.format.containerMimeType;
-
-      Extractor extractor;
-      if (MimeTypes.isText(containerMimeType)) {
-        if (MimeTypes.APPLICATION_RAWCC.equals(containerMimeType)) {
-          // RawCC is special because it's a text specific container format.
-          extractor = new RawCcExtractor(representation.format);
-        } else {
-          // All other text types are raw formats that do not need an extractor.
-          return null;
-        }
-      } else if (MimeTypes.isMatroska(containerMimeType)) {
-        extractor = new MatroskaExtractor(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES);
-      } else {
-        int flags = 0;
-        if (enableEventMessageTrack) {
-          flags |= FragmentedMp4Extractor.FLAG_ENABLE_EMSG_TRACK;
-        }
-        extractor =
-            new FragmentedMp4Extractor(
-                flags,
-                /* timestampAdjuster= */ null,
-                /* sideloadedTrack= */ null,
-                closedCaptionFormats,
-                playerEmsgTrackOutput);
-      }
-      return new BundledChunkExtractor(extractor, trackType, representation.format);
+      return nowPeriodTimeUs == C.TIME_UNSET || getSegmentEndTimeUs(segmentNum) <= nowPeriodTimeUs;
     }
   }
 }
